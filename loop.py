@@ -9,7 +9,7 @@ import time
 from functools import partial
 
 topo = topology()
-topo.addCells(2, 2)
+topo.addCells(3, 1)
 print(topo.sw_conns)
 
 
