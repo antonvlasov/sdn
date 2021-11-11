@@ -20,7 +20,7 @@ from enum import Enum
 from ryu.topology import event
 from ryu.topology.api import get_all_host, get_all_link, get_all_switch, get_host, get_switch, get_link
 import copy
-from ryu.topology.switches import Port, Switch
+from ryu.topology.switches import Port, Switch, Host
 from ryu.controller.controller import Datapath
 
 
@@ -48,6 +48,9 @@ Node.update_forward_refs()
 
 class MULTIPATH_13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+
+    net_graph: Dict[int, Node]
+    hosts: Dict[str, Host]
 
     def __init__(self, *args, **kwargs):
         super(MULTIPATH_13, self).__init__(*args, **kwargs)
@@ -252,6 +255,7 @@ class MULTIPATH_13(app_manager.RyuApp):
         hosts = copy.copy(get_host(self))
         for host in hosts:
             self.hosts[host.mac] = host
+        print(self.hosts)
 
     def add_link(self, src: Port, dst: Port):
         try:
