@@ -17,7 +17,11 @@ from pydantic import BaseModel
 from typing import Dict, Optional, Any, List
 from enum import Enum
 
-from pprint import pprint
+from ryu.topology import event
+from ryu.topology.api import get_all_host, get_all_link, get_all_switch, get_host, get_switch, get_link
+import copy
+from ryu.topology.switches import Port, Switch
+from ryu.controller.controller import Datapath
 
 
 class NodeType(Enum):
@@ -32,10 +36,11 @@ class Node(BaseModel):
     datapath: Optional[Any]
     neighbours: Dict[int, 'Node'] = {}  # port to node
     mac_to_port: Dict[str, int]  # mac to port for faster access
-    port_speeds: Dict[int, int]  # port to Current port bitrate in kbps
+    ports: List[Port]
 
     class Config:
         use_enum_values = True
+        arbitrary_types_allowed = True
 
 
 Node.update_forward_refs()
@@ -47,6 +52,8 @@ class MULTIPATH_13(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(MULTIPATH_13, self).__init__(*args, **kwargs)
         self.net_graph = {}  # datapath.id to Node
+        self.mac_to_port = {}  # for arp
+        self.hosts = {}  # mac to host
         self.mutex = hub.BoundedSemaphore()
 
         self.monitor_thread = hub.spawn(self.query_switch_statistics)
@@ -59,36 +66,6 @@ class MULTIPATH_13(app_manager.RyuApp):
         self.logger.debug('OFPErrorMsg received: type=0x%02x code=0x%02x '
                           'message=%s', msg.type, msg.code,
                           utils.hex_array(msg.data))
-
-    @set_ev_cls(ofp_event.EventOFPStateChange,
-                [MAIN_DISPATCHER, DEAD_DISPATCHER])
-    def _state_change_handler(self, ev):
-        datapath = ev.datapath
-        try:
-            self.mutex.acquire()
-            if ev.state == MAIN_DISPATCHER:
-                if datapath.id not in self.net_graph:
-                    self.logger.debug('register datapath: %016x', datapath.id)
-                    node = Node(node_type=NodeType.OF_SWITCH,
-                                datapath=datapath, neighbours={}, mac_to_port={}, port_speeds={})
-                    self.net_graph[datapath.id] = node
-                    self.send_port_desc_stats_request(datapath)
-            elif ev.state == DEAD_DISPATCHER:
-                if datapath.id in self.net_graph:
-                    self.logger.debug(
-                        'unregister datapath: %016x', datapath.id)
-                    # TODO: change routes
-                    for neighbour in self.net_graph[datapath.id].neighbours.values():
-                        # delete from neighbour list
-                        for port, dp in neighbour.neighbours.items():
-                            if dp.id == datapath.id:
-                                del neighbour.neighbours[port]
-                        # we don't track datapath macs so no need to clear mac_to_port
-                    # delete the very node
-                    del self.net_graph[datapath.id]
-                    print('deleted datapath ', datapath)
-        finally:
-            self.mutex.release()
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -103,23 +80,6 @@ class MULTIPATH_13(app_manager.RyuApp):
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, 0, match, actions)
         self.logger.info("switch:%s connected", dpid)
-
-    def send_port_desc_stats_request(self, datapath):
-        ofp_parser = datapath.ofproto_parser
-
-        req = ofp_parser.OFPPortDescStatsRequest(datapath, 0)
-        datapath.send_msg(req)
-
-    @set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
-    def port_desc_stats_reply_handler(self, ev):
-        try:
-            self.mutex.acquire()
-            dp = ev.msg.datapath
-            for p in ev.msg.body:
-                self.net_graph[dp.id].port_speeds[p.port_no] = p.curr_speed
-            self.logger.info(self.net_graph[dp.id].port_speeds)
-        finally:
-            self.mutex.release()
 
     def add_flow(self, datapath, hard_timeout, priority, match, actions):
         ofproto = datapath.ofproto
@@ -169,11 +129,7 @@ class MULTIPATH_13(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
 
-        node = self.net_graph.get(datapath.id)
-        if node is None:
-            self.logger.info("Dpid is not in net_graph")
-            return
-        out_port = node.mac_to_port.get(eth_pkt.dst)
+        out_port = self.mac_to_port[datapath.id].get(eth_pkt.dst)
         if out_port is not None:
             match = parser.OFPMatch(in_port=in_port, eth_dst=eth_pkt.dst,
                                     eth_type=eth_pkt.ethertype)
@@ -181,30 +137,18 @@ class MULTIPATH_13(app_manager.RyuApp):
             self.add_flow(datapath, 0, 1, match, actions)
             self.send_packet_out(datapath, msg.buffer_id, in_port,
                                  out_port, msg.data)
-            self.logger.debug("Reply ARP to known host")
+            self.logger.debug("Reply ARP to knew host")
         else:
             self.flood(msg)
 
     def mac_learning(self, dpid, src_mac, in_port, ipv4=None):
-        try:
-            self.mutex.acquire()
-            if self.net_graph.get(dpid) is None:
-                self.logger.info("Dpid is not in net_graph")
+        self.mac_to_port.setdefault(dpid, {})
+        if src_mac in self.mac_to_port[dpid]:
+            if in_port != self.mac_to_port[dpid][src_mac]:
                 return False
-
-            node = Node(node_type=NodeType.HOST, mac=src_mac,
-                        ipv4=ipv4, neighbours={0: self.net_graph[dpid]}, mac_to_port={}, port_speeds={})
-
-            if src_mac in self.net_graph[dpid].mac_to_port:
-                if in_port != self.net_graph[dpid].mac_to_port[src_mac]:
-                    # same mac from different port
-                    return False
-            else:
-                self.net_graph[dpid].neighbours[in_port] = node
-                self.net_graph[dpid].mac_to_port[src_mac] = in_port
-            return True
-        finally:
-            self.mutex.release()
+        else:
+            self.mac_to_port[dpid][src_mac] = in_port
+        return True
 
     @ set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -236,12 +180,12 @@ class MULTIPATH_13(app_manager.RyuApp):
 
         if isinstance(ip_pkt, ipv4.ipv4):
             self.logger.debug("IPV4 processing")
-            node = self.net_graph.get(dpid)
-            if node is None:
-                self.logger.info("Dpid is not in net_graph")
+            mac_to_port_table = self.mac_to_port.get(dpid)
+            if mac_to_port_table is None:
+                self.logger.info("Dpid is not in mac_to_port")
                 return
 
-            out_port = node.mac_to_port.get(eth.dst)
+            out_port = mac_to_port_table.get(eth.dst)
             if out_port is not None:
                 actions = [parser.OFPActionOutput(out_port)]
                 match = parser.OFPMatch(in_port=in_port, eth_dst=eth.dst,
@@ -258,15 +202,15 @@ class MULTIPATH_13(app_manager.RyuApp):
 
     def query_switch_statistics(self):
         return
-        while True:
-            hub.sleep(1)
-            for node in self.net_graph.values():
-                dp = node.datapath
-                ofp = dp.ofproto
-                ofp_parser = dp.ofproto_parser
-                req = ofp_parser.OFPPortStatsRequest(dp, 0, ofp.OFPP_ANY)
-                print('Sent ', req)
-                dp.send_msg(req)
+        # while True:
+        #     hub.sleep(1)
+        #     for node in self.net_graph.values():
+        #         dp = node.datapath
+        #         ofp = dp.ofproto
+        #         ofp_parser = dp.ofproto_parser
+        #         req = ofp_parser.OFPPortStatsRequest(dp, 0, ofp.OFPP_ANY)
+        #         print('Sent ', req)
+        #         dp.send_msg(req)
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def port_stats_reply_handler(self, ev):
@@ -288,3 +232,51 @@ class MULTIPATH_13(app_manager.RyuApp):
                           stat.rx_crc_err, stat.collisions,
                           stat.duration_sec, stat.duration_nsec))
         print('PortStats: ', ports)
+
+    @set_ev_cls(event.EventSwitchEnter)
+    def handler_switch_enter(self, ev):
+        dp = ev.switch.dp
+        self.add_new_switches()
+
+        # add links to net_graph
+        topo_raw_links = copy.copy(get_link(self))
+        for l in topo_raw_links:
+            if l.src.dpid == dp.id or l.dst.dpid == dp.id:
+                self.add_link(l.src, l.dst)
+
+        print('Switch {} entered'.format(dp.id))
+        print('\t\t', self.net_graph, '\n')
+
+    @set_ev_cls(event.EventHostAdd)
+    def handler_new_host(self, ev):
+        hosts = copy.copy(get_host(self))
+        for host in hosts:
+            self.hosts[host.mac] = host
+
+    def add_link(self, src: Port, dst: Port):
+        try:
+            self.mutex.acquire()
+            self.net_graph[src.dpid].neighbours[src.port_no] = self.net_graph[dst.dpid]
+        finally:
+            self.mutex.release()
+
+    def add_new_switches(self):
+        switches = copy.copy(get_switch(self))
+        try:
+            self.mutex.acquire()
+            for sw in switches:
+                datapath = self.net_graph.get(sw)
+                if datapath is not None:
+                    continue
+
+                # assume ports start from 1 and are ordered Port
+                node = Node(node_type=NodeType.OF_SWITCH, datapath=sw.dp,
+                            neighbours={}, mac_to_port={}, ports=sw.ports)
+                # validate assumption
+                for i in range(len(node.ports)):
+                    if node.ports[i].port_no != i+1:
+                        raise "port order assumption failed"
+
+                self.net_graph[sw.dp.id] = node
+        finally:
+            self.mutex.release()
