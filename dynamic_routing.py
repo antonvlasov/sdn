@@ -176,32 +176,30 @@ class MULTIPATH_13(app_manager.RyuApp):
 
         if isinstance(ip_pkt, ipv4.ipv4):
             path = self.get_route(eth.src, eth.dst)
+            # try one more time because graph could have been not updated
             if path is None:
                 self.add_or_update_switch()
-            print("got path")
+                path = self.get_route(eth.src, eth.dst)
+            if path is None:
+                self.logger.info(
+                    "could not create path from %s to %s", eth.src, eth.dst)
+                return
+
             for port in path[::-1]:
                 print("dpid: {} port_no: {}".format(port.dpid, port.port_no))
 
-            self.logger.debug("IPV4 processing")
-            mac_to_port_table = self.mac_to_port.get(dpid)
-            if mac_to_port_table is None:
-                self.logger.info("Dpid is not in mac_to_port")
-                return
+            # add flows to all switches in route
+            for path_node in path:
+                actions = [parser.OFPActionOutput(path_node.port_no)]
+                match = parser.OFPMatch(eth_dst=eth.dst)
+                dp = self.net_graph[path_node.dpid].datapath
+                self.add_flow(dp, 0, 1, match, actions)
 
-            out_port = mac_to_port_table.get(eth.dst)
-            if out_port is not None:
-                actions = [parser.OFPActionOutput(out_port)]
-                match = parser.OFPMatch(in_port=in_port, eth_dst=eth.dst,
-                                        eth_type=eth.ethertype)
-                self.add_flow(datapath, 0, 1, match, actions)
-                self.send_packet_out(datapath, msg.buffer_id, in_port,
-                                     out_port, msg.data)
-            else:
-                if self.mac_learning(dpid, eth.src, in_port) is False:
-                    self.logger.debug("IPV4 packet enter in different ports")
-                    return
-                else:
-                    self.flood(msg)
+            # current switch out port
+            out_port = path[-1].port_no
+            # send this packet through the right port
+            self.send_packet_out(datapath, msg.buffer_id, in_port,
+                                 out_port, msg.data)
 
     def query_switch_statistics(self):
         return
@@ -241,7 +239,7 @@ class MULTIPATH_13(app_manager.RyuApp):
         dp = ev.switch.dp
         self.add_or_update_switch(dp)
 
-    def add_or_update_switch(self, dp: Datapath):
+    def add_or_update_switch(self, dp: Datapath = None):
         """if dp==None, all switches are updated
         """
         if dp is not None:
@@ -270,7 +268,6 @@ class MULTIPATH_13(app_manager.RyuApp):
         hosts = copy.copy(get_host(self))
         for host in hosts:
             self.hosts[host.mac] = host
-        print(self.hosts)
 
     def add_link(self, src: Port, dst: Port):
         try:
@@ -300,7 +297,7 @@ class MULTIPATH_13(app_manager.RyuApp):
         finally:
             self.mutex.release()
 
-    def get_route(self, src_mac: int, dst_mac: int) -> Dict[int, Port]:
+    def get_route(self, src_mac: int, dst_mac: int) -> List[Port]:
         # get connected switches
         src_host = self.hosts.get(src_mac)
         dst_host = self.hosts.get(dst_mac)
@@ -311,13 +308,14 @@ class MULTIPATH_13(app_manager.RyuApp):
 
         path = self.bfs(src_dpid, dst_dpid)
         if path is None:
+            # TODO : what if hosts are on same switch?
             return None
 
         # add path from last switch to dst host
         path.insert(0, dst_host.port)
         return path
 
-    def bfs(self, src_dpid: int, dst_dpid: int) -> Dict[int, Port]:
+    def bfs(self, src_dpid: int, dst_dpid: int) -> List[Port]:
         visited: List[int] = []  # List to keep track of visited nodes.
         queue: List[int] = [src_dpid]  # Initialize a queue
         prevs: Dict[int, Port] = {}  # dpid to previous port
