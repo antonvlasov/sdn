@@ -33,7 +33,7 @@ class Node(BaseModel):
     node_type: NodeType
     mac: Optional[str]
     ipv4: Optional[str]
-    datapath: Optional[Any]
+    datapath: Optional[Datapath]
     neighbours: Dict[int, 'Node'] = {}  # port to node
     mac_to_port: Dict[str, int]  # mac to port for faster access
     ports: List[Port]
@@ -137,7 +137,7 @@ class MULTIPATH_13(app_manager.RyuApp):
             match = parser.OFPMatch(in_port=in_port, eth_dst=eth_pkt.dst,
                                     eth_type=eth_pkt.ethertype)
             actions = [parser.OFPActionOutput(out_port)]
-            self.add_flow(datapath, 0, 1, match, actions)
+            self.add_flow(datapath, 15, 1, match, actions)
             self.send_packet_out(datapath, msg.buffer_id, in_port,
                                  out_port, msg.data)
             self.logger.debug("Reply ARP to knew host")
@@ -166,13 +166,6 @@ class MULTIPATH_13(app_manager.RyuApp):
         arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
 
-        ip_pkt_6 = pkt.get_protocol(ipv6.ipv6)
-        if isinstance(ip_pkt_6, ipv6.ipv6):
-            actions = []
-            match = parser.OFPMatch(eth_type=ether.ETH_TYPE_IPV6)
-            self.add_flow(datapath, 0, 1, match, actions)
-            return
-
         if isinstance(arp_pkt, arp.arp):
             self.logger.debug("ARP processing")
             if self.mac_learning(dpid, eth.src, in_port) is False:
@@ -182,6 +175,13 @@ class MULTIPATH_13(app_manager.RyuApp):
             self.arp_forwarding(msg, arp_pkt.src_ip, arp_pkt.dst_ip, eth)
 
         if isinstance(ip_pkt, ipv4.ipv4):
+            path = self.get_route(eth.src, eth.dst)
+            if path is None:
+                self.add_or_update_switch()
+            print("got path")
+            for port in path[::-1]:
+                print("dpid: {} port_no: {}".format(port.dpid, port.port_no))
+
             self.logger.debug("IPV4 processing")
             mac_to_port_table = self.mac_to_port.get(dpid)
             if mac_to_port_table is None:
@@ -239,16 +239,31 @@ class MULTIPATH_13(app_manager.RyuApp):
     @set_ev_cls(event.EventSwitchEnter)
     def handler_switch_enter(self, ev):
         dp = ev.switch.dp
+        self.add_or_update_switch(dp)
+
+    def add_or_update_switch(self, dp: Datapath):
+        """if dp==None, all switches are updated
+        """
+        if dp is not None:
+            print("Enterd switch ", dp.id)
         self.add_new_switches()
 
         # add links to net_graph
         topo_raw_links = copy.copy(get_link(self))
         for l in topo_raw_links:
-            if l.src.dpid == dp.id or l.dst.dpid == dp.id:
+            if dp is None or l.src.dpid == dp.id or l.dst.dpid == dp.id:
                 self.add_link(l.src, l.dst)
 
-        print('Switch {} entered'.format(dp.id))
-        print('\t\t', self.net_graph, '\n')
+        print(" \t" + "Current Links:")
+        for l in topo_raw_links:
+            print(" \t\t" + str(l))
+
+        print(" \t" + "Saved Links:")
+        for dpid, s in self.net_graph.items():
+            for port, l in s.neighbours.items():
+                print(" \t\t dpid: {}, port: {} dpid: {}".format(
+                    dpid, port, l.datapath.id))
+            print()
 
     @set_ev_cls(event.EventHostAdd)
     def handler_new_host(self, ev):
@@ -269,7 +284,7 @@ class MULTIPATH_13(app_manager.RyuApp):
         try:
             self.mutex.acquire()
             for sw in switches:
-                datapath = self.net_graph.get(sw)
+                datapath = self.net_graph.get(sw.dp.id)
                 if datapath is not None:
                     continue
 
@@ -284,3 +299,50 @@ class MULTIPATH_13(app_manager.RyuApp):
                 self.net_graph[sw.dp.id] = node
         finally:
             self.mutex.release()
+
+    def get_route(self, src_mac: int, dst_mac: int) -> Dict[int, Port]:
+        # get connected switches
+        src_host = self.hosts.get(src_mac)
+        dst_host = self.hosts.get(dst_mac)
+        if src_host is None or dst_host is None:
+            return None
+        src_dpid = src_host.port.dpid
+        dst_dpid = dst_host.port.dpid
+
+        path = self.bfs(src_dpid, dst_dpid)
+        if path is None:
+            return None
+
+        # add path from last switch to dst host
+        path.insert(0, dst_host.port)
+        return path
+
+    def bfs(self, src_dpid: int, dst_dpid: int) -> Dict[int, Port]:
+        visited: List[int] = []  # List to keep track of visited nodes.
+        queue: List[int] = [src_dpid]  # Initialize a queue
+        prevs: Dict[int, Port] = {}  # dpid to previous port
+
+        while queue:
+            cur = queue.pop(0)
+            visited.append(cur)
+
+            for port_no, node in self.net_graph[cur].neighbours.items():
+                if NodeType(node.node_type) == NodeType.OF_SWITCH \
+                        and node.datapath.id not in visited:
+                    queue.append(node.datapath.id)
+                    prevs[node.datapath.id] = self.net_graph[cur].ports[port_no-1]
+                    if node.datapath.id == dst_dpid:
+                        break
+            else:
+                continue
+            break
+
+        target = prevs.get(dst_dpid)
+        if target is None:
+            return None
+        path = []
+        cur = dst_dpid
+        while prevs.get(cur) is not None:
+            path.append(prevs[cur])
+            cur = prevs[cur].dpid
+        return path
