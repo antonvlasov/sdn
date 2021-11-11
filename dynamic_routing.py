@@ -32,6 +32,7 @@ class Node(BaseModel):
     datapath: Optional[Any]
     neighbours: Dict[int, 'Node'] = {}  # port to node
     mac_to_port: Dict[str, int]  # mac to port for faster access
+    port_speeds: Dict[int, int]  # port to Current port bitrate in kbps
 
     class Config:
         use_enum_values = True
@@ -69,9 +70,9 @@ class MULTIPATH_13(app_manager.RyuApp):
                 if datapath.id not in self.net_graph:
                     self.logger.debug('register datapath: %016x', datapath.id)
                     node = Node(node_type=NodeType.OF_SWITCH,
-                                datapath=datapath, neighbours={}, mac_to_port={})
+                                datapath=datapath, neighbours={}, mac_to_port={}, port_speeds={})
                     self.net_graph[datapath.id] = node
-                    print('added datapath ', datapath)
+                    self.send_port_desc_stats_request(datapath)
             elif ev.state == DEAD_DISPATCHER:
                 if datapath.id in self.net_graph:
                     self.logger.debug(
@@ -102,6 +103,23 @@ class MULTIPATH_13(app_manager.RyuApp):
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, 0, match, actions)
         self.logger.info("switch:%s connected", dpid)
+
+    def send_port_desc_stats_request(self, datapath):
+        ofp_parser = datapath.ofproto_parser
+
+        req = ofp_parser.OFPPortDescStatsRequest(datapath, 0)
+        datapath.send_msg(req)
+
+    @set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
+    def port_desc_stats_reply_handler(self, ev):
+        try:
+            self.mutex.acquire()
+            dp = ev.msg.datapath
+            for p in ev.msg.body:
+                self.net_graph[dp.id].port_speeds[p.port_no] = p.curr_speed
+            self.logger.info(self.net_graph[dp.id].port_speeds)
+        finally:
+            self.mutex.release()
 
     def add_flow(self, datapath, hard_timeout, priority, match, actions):
         ofproto = datapath.ofproto
@@ -175,7 +193,7 @@ class MULTIPATH_13(app_manager.RyuApp):
                 return False
 
             node = Node(node_type=NodeType.HOST, mac=src_mac,
-                        ipv4=ipv4, neighbours={0: self.net_graph[dpid]}, mac_to_port={})
+                        ipv4=ipv4, neighbours={0: self.net_graph[dpid]}, mac_to_port={}, port_speeds={})
 
             if src_mac in self.net_graph[dpid].mac_to_port:
                 if in_port != self.net_graph[dpid].mac_to_port[src_mac]:
