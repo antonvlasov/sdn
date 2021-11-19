@@ -36,7 +36,7 @@ class Node(BaseModel):
     datapath: Optional[Datapath]
     neighbours: Dict[int, 'Node'] = {}  # port to node
     mac_to_port: Dict[str, int]  # mac to port for faster access
-    ports: List[Port]
+    ports: Dict[int, Port]
 
     class Config:
         use_enum_values = True
@@ -178,7 +178,7 @@ class MULTIPATH_13(app_manager.RyuApp):
             path = self.get_route(eth.src, eth.dst)
             # try one more time because graph could have been not updated
             if path is None:
-                self.add_or_update_switch()
+                self.update_switches()
                 path = self.get_route(eth.src, eth.dst)
             if path is None:
                 self.logger.info(
@@ -236,21 +236,18 @@ class MULTIPATH_13(app_manager.RyuApp):
 
     @set_ev_cls(event.EventSwitchEnter)
     def handler_switch_enter(self, ev):
-        dp = ev.switch.dp
-        self.add_or_update_switch(dp)
+        self.logger.info(f"new switch entered: {ev.switch.dp.id}")
+        self.update_switches()
 
-    def add_or_update_switch(self, dp: Datapath = None):
+    def update_switches(self):
         """if dp==None, all switches are updated
         """
-        if dp is not None:
-            print("Enterd switch ", dp.id)
-        self.add_new_switches()
+        self.save_new_switches()
 
         # add links to net_graph
         topo_raw_links = copy.copy(get_link(self))
         for l in topo_raw_links:
-            if dp is None or l.src.dpid == dp.id or l.dst.dpid == dp.id:
-                self.add_link(l.src, l.dst)
+            self.add_link(l.src, l.dst)
 
         print(" \t" + "Current Links:")
         for l in topo_raw_links:
@@ -276,22 +273,19 @@ class MULTIPATH_13(app_manager.RyuApp):
         finally:
             self.mutex.release()
 
-    def add_new_switches(self):
+    def save_new_switches(self):
         switches = copy.copy(get_switch(self))
         try:
             self.mutex.acquire()
             for sw in switches:
-                datapath = self.net_graph.get(sw.dp.id)
-                if datapath is not None:
-                    continue
-
-                # assume ports start from 1 and are ordered Port
                 node = Node(node_type=NodeType.OF_SWITCH, datapath=sw.dp,
-                            neighbours={}, mac_to_port={}, ports=sw.ports)
-                # validate assumption
-                for i in range(len(node.ports)):
-                    if node.ports[i].port_no != i+1:
-                        raise "port order assumption failed"
+                            neighbours={}, mac_to_port={}, ports={port.port_no: port for port in sw.ports})
+
+                for i, port in node.ports.items():
+                    if port.port_no != i:
+                        for j in node.ports:
+                            self.logger.fatal(f"{j} {node.ports[j].port_no}")
+                        raise Exception("port order assumption failed")
 
                 self.net_graph[sw.dp.id] = node
         finally:
@@ -328,7 +322,7 @@ class MULTIPATH_13(app_manager.RyuApp):
                 if NodeType(node.node_type) == NodeType.OF_SWITCH \
                         and node.datapath.id not in visited:
                     queue.append(node.datapath.id)
-                    prevs[node.datapath.id] = self.net_graph[cur].ports[port_no-1]
+                    prevs[node.datapath.id] = self.net_graph[cur].ports[port_no]
                     if node.datapath.id == dst_dpid:
                         break
             else:
