@@ -1,2 +1,5 @@
 pydantic
+pyvis
 eventlet==0.30.2
+fastapi
+ujson

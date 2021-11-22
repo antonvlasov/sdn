@@ -1,7 +1,6 @@
 from mininet.log import lg
 from mininet.node import RemoteController
 from mininet.cli import CLI
-import net_topo
 from net_topo.topo import topology
 from mininet.topo import Topo
 from mininet.net import Mininet

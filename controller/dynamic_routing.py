@@ -14,7 +14,6 @@ from ryu.lib.packet import ipv6
 from ryu import utils
 
 from ryu.lib import hub
-from pydantic import BaseModel
 from typing import Dict, Optional, Any, List, Set, Tuple
 from enum import Enum
 
@@ -25,7 +24,7 @@ from ryu.topology.switches import Port, Switch, Host
 from ryu.controller.controller import Datapath
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class NodeType(Enum):
@@ -33,21 +32,12 @@ class NodeType(Enum):
     HOST = 2
 
 
-class Node(BaseModel):
+@dataclass
+class Node:
     node_type: NodeType
-    mac: Optional[str]
-    ipv4: Optional[str]
     datapath: Optional[Datapath]
-    neighbours: Dict[int, 'Node'] = {}  # port to node
-    # mac_to_port: Dict[str, int]  # mac to port for faster access
-    ports: Dict[int, Port]
-
-    class Config:
-        use_enum_values = True
-        arbitrary_types_allowed = True
-
-
-Node.update_forward_refs()
+    neighbours: Dict[int, 'Node'] = field(default_factory=dict)  # port to node
+    ports: Dict[int, Port] = field(default_factory=dict)
 
 
 class ArpDispatcher:
@@ -441,7 +431,7 @@ class MULTIPATH_13(app_manager.RyuApp):
             self.mutex.acquire()
             for sw in switches:
                 node = Node(node_type=NodeType.OF_SWITCH, datapath=sw.dp,
-                            neighbours={}, mac_to_port={}, ports={port.port_no: port for port in sw.ports})
+                            neighbours={}, ports={port.port_no: port for port in sw.ports})
 
                 for i, port in node.ports.items():
                     if port.port_no != i:
