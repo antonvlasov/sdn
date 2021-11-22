@@ -36,8 +36,12 @@ func (r *client) makeOpinion() {
 }
 func (r *client) run() error {
 	for {
-		if err := r.updateCommand(); err != nil {
+		changed, err := r.updateCommand()
+		if err != nil {
 			return err
+		}
+		if changed {
+			r.makeOpinion()
 		}
 
 		if err := r.sendMessages(); err != nil {
@@ -47,16 +51,17 @@ func (r *client) run() error {
 		time.Sleep(time.Duration(r.settings.MessageIntervalSeconds) * time.Second)
 	}
 }
-func (r *client) updateCommand() error {
+func (r *client) updateCommand() (bool, error) {
 	b, err := os.ReadFile(r.commandFile)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	if err := json.Unmarshal(b, &r.settings); err != nil {
-		return err
+	var s Settings
+	if err := json.Unmarshal(b, &s); err != nil {
+		return false, err
 	}
-	return nil
+	return s != r.settings, err
 }
 func ClearResponse(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -102,7 +107,8 @@ func newClient(commandFile string, targets []string) (*client, error) {
 		commandFile: commandFile,
 		targets:     targets,
 	}
-	if err := c.updateCommand(); err != nil {
+	_, err := c.updateCommand()
+	if err != nil {
 		return nil, err
 	}
 	c.makeOpinion()
