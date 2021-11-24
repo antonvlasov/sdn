@@ -25,6 +25,7 @@ func simpleParseArgs() (int, string, []string) {
 }
 
 func main() {
+	fmt.Println("starting host-service...")
 	port, commandFile, targets := simpleParseArgs()
 	log.Fatal(service.RunService(port, commandFile, targets))
 }

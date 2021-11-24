@@ -6,7 +6,7 @@ from mininet.topo import Topo
 from mininet.net import Mininet
 
 topo = topology()
-topo.addCells(4, 9)
+topo.addCells(2, 2)
 print(topo.sw_conns)
 
 
@@ -36,18 +36,27 @@ topos = {'clusterTopo': (lambda: ClusterTopo())}
 
 
 def StartServer(network):
-    uvicorn = 'uvicorn counting_server.server:app --host {} --port 8001 &'
-    for host in network.hosts:
-        host.cmd(uvicorn.format(host.IP()))
+    hosts = sorted([h for h in network.hosts], key=lambda x: x.IP())
+    targets = [h.IP()+":6000" for h in hosts]
 
-    min_ip, max_ip = "", ""
-    if len(network.hosts) > 0:
-        min_ip = network.hosts[0].IP()
-        max_ip = network.hosts[len(network.hosts)-1].IP()
-    client = 'python3 -m counting_server.client -s {} -e {} &'.format(
-        min_ip, max_ip)
-    for host in network.hosts:
-        host.cmd(client)
+    for i, h in enumerate(hosts):
+        tt = list(targets)
+        del tt[i]
+        targets_arg = ','.join(map(str, tt))
+
+        cmd = ' '.join(
+            ['/home/mininet/project/host_service/host-service', '6000', '/home/mininet/project/host_service/control', targets_arg, '&'])
+        res = h.cmd(cmd)
+        if res != "":
+            print(res)
+    # min_ip, max_ip = "", ""
+    # if len(network.hosts) > 0:
+    #     min_ip = network.hosts[0].IP()
+    #     max_ip = network.hosts[len(network.hosts)-1].IP()
+    # client = 'python3 -m counting_server.client -s {} -e {} &'.format(
+    #     min_ip, max_ip)
+    # for host in network.hosts:
+    #     host.cmd(client)
 
 
 if __name__ == "__main__":
@@ -55,6 +64,6 @@ if __name__ == "__main__":
     net = Mininet(topo=ClusterTopo(), controller=RemoteController(
         'ryu', port=6653), autoSetMacs=True)
     net.start()
-    # StartServer(net)
+    StartServer(net)
     CLI(net)
     net.stop()

@@ -31,7 +31,7 @@ func (r *client) makeOpinion() {
 	rand.Seed(time.Now().Unix())
 	r.opinion = make([]byte, r.settings.PacketSize)
 	for i := range r.opinion {
-		r.opinion[i] = byte(rand.Int31n(256))
+		r.opinion[i] = byte(40 + rand.Int31n(80))
 	}
 }
 func (r *client) run() error {
@@ -61,7 +61,9 @@ func (r *client) updateCommand() (bool, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return false, err
 	}
-	return s != r.settings, err
+	changed := s != r.settings
+	r.settings = s
+	return changed, err
 }
 func ClearResponse(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, resp.Body)
