@@ -4,16 +4,17 @@ from mininet.cli import CLI
 from net_topo.topo import topology
 from mininet.topo import Topo
 from mininet.net import Mininet
+from mininet.link import TCLink
 
 topo = topology()
-topo.addCells(2, 2)
+topo.addCells(3, 5)
 print(topo.sw_conns)
 
 
 class ClusterTopo(Topo):
     "Simple loop topology example."
 
-    def __init__(self):
+    def __init__(self, bw):
         "Create custom loop topo."
 
         # Initialize topology
@@ -27,15 +28,16 @@ class ClusterTopo(Topo):
             switches[hs[1]] = self.addSwitch(hs[1])
 
         for edge in topo.endpoints:
-            self.addLink(hosts[edge[0]], switches[edge[1]])
+            self.addLink(hosts[edge[0]], switches[edge[1]], cls=TCLink, bw=bw)
         for edge in topo.sw_conns:
-            self.addLink(switches[edge[0]], switches[edge[1]])
+            self.addLink(switches[edge[0]],
+                         switches[edge[1]], cls=TCLink, bw=bw)
 
 
 topos = {'clusterTopo': (lambda: ClusterTopo())}
 
 
-def StartServer(network):
+def StartServices(network):
     hosts = sorted([h for h in network.hosts], key=lambda x: x.IP())
     targets = [h.IP()+":6000" for h in hosts]
 
@@ -61,9 +63,9 @@ def StartServer(network):
 
 if __name__ == "__main__":
     lg.setLogLevel('info')
-    net = Mininet(topo=ClusterTopo(), controller=RemoteController(
-        'ryu', port=6653), autoSetMacs=True)
+    net = Mininet(topo=ClusterTopo(10), controller=RemoteController(
+        'ryu', port=6653), autoSetMacs=True, link=TCLink)
     net.start()
-    StartServer(net)
+    # StartServices(net)
     CLI(net)
     net.stop()
