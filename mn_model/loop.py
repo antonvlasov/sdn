@@ -6,12 +6,13 @@ from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.link import TCLink
 
-topo = topology()
-topo.addCells(3, 5)
-print(topo.sw_conns)
+# topo = topology()
+# topo.addCells(3, 5)
+# print(topo.sw_conns)
+topo = topology.from_csv("/home/mininet/project/data/topology.csv")
 
 
-class ClusterTopo(Topo):
+class MyTopo(Topo):
     "Simple loop topology example."
 
     def __init__(self, bw):
@@ -34,7 +35,7 @@ class ClusterTopo(Topo):
                          switches[edge[1]], cls=TCLink, bw=bw)
 
 
-topos = {'clusterTopo': (lambda: ClusterTopo())}
+topos = {'my_topo': (lambda: MyTopo())}
 
 
 def StartServices(network):
@@ -63,7 +64,7 @@ def StartServices(network):
 
 if __name__ == "__main__":
     lg.setLogLevel('info')
-    net = Mininet(topo=ClusterTopo(10), controller=RemoteController(
+    net = Mininet(topo=MyTopo(10), controller=RemoteController(
         'ryu', port=6653), autoSetMacs=True, link=TCLink)
     net.start()
     # StartServices(net)
