@@ -9,13 +9,12 @@ from mininet.link import TCLink
 # topo = topology()
 # topo.addCells(3, 5)
 # print(topo.sw_conns)
-topo = topology.from_csv("/home/mininet/project/data/topology.csv")
 
 
 class MyTopo(Topo):
     "Simple loop topology example."
 
-    def __init__(self, bw):
+    def __init__(self, topo: topology):
         "Create custom loop topo."
 
         # Initialize topology
@@ -29,13 +28,10 @@ class MyTopo(Topo):
             switches[hs[1]] = self.addSwitch(hs[1])
 
         for edge in topo.endpoints:
-            self.addLink(hosts[edge[0]], switches[edge[1]], cls=TCLink, bw=bw)
+            self.addLink(hosts[edge[0]], switches[edge[1]], cls=TCLink)
         for edge in topo.sw_conns:
             self.addLink(switches[edge[0]],
-                         switches[edge[1]], cls=TCLink, bw=bw)
-
-
-topos = {'my_topo': (lambda: MyTopo())}
+                         switches[edge[1]], cls=TCLink)
 
 
 def StartServices(network):
@@ -64,7 +60,8 @@ def StartServices(network):
 
 if __name__ == "__main__":
     lg.setLogLevel('info')
-    net = Mininet(topo=MyTopo(10), controller=RemoteController(
+    topo = topology.from_csv("/home/mininet/project/data/topology.csv")
+    net = Mininet(topo=MyTopo(topo), controller=RemoteController(
         'ryu', port=6653), autoSetMacs=True, link=TCLink)
     net.start()
     # StartServices(net)

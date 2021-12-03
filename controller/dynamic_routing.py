@@ -31,9 +31,30 @@ from random import randint
 
 import struct
 
+import importlib.util
+spec = importlib.util.spec_from_file_location(
+    "net_topo.topo", "/home/mininet/project/net_topo/topo.py")
+topo = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(topo)
+
 UINT64_MAX = 18446744073709551616
 
 random.seed()
+
+
+def get_bandwidths(topo: topo.topology) -> Dict[int, Dict[int, int]]:
+    result = {}
+    for edge in topo.sw_conns:
+        s1, s2, bw = int(edge[0][1:]), int(edge[1][1:]), int(edge[2])
+        result.setdefault(s1, {})
+        result.setdefault(s2, {})
+        result[s1][s2] = bw
+        result[s2][s1] = bw
+    return result
+
+
+BANDWIDTHS = get_bandwidths(topo.topology.from_csv(
+    "/home/mininet/project/data/topology.csv"))
 
 
 class NodeType(Enum):
@@ -46,8 +67,8 @@ class SimplePort:
     dpid: int
     port_no: int
     mac: str
-    max_load: int
-    load: int
+    load: int = 0
+    max_load: int = 0
 
 
 @dataclass
@@ -186,6 +207,7 @@ class NetGraph:
             self.mutex.acquire()
             for l in links:
                 self._node_graph[l.src.dpid].neighbours[l.src.port_no] = self._node_graph[l.dst.dpid]
+                self._node_graph[l.src.dpid].ports[l.src.port_no].max_load = BANDWIDTHS[l.src.dpid][l.dst.dpid]
         finally:
             self.mutex.release()
 
@@ -194,7 +216,7 @@ class NetGraph:
             self.mutex.acquire()
             for sw in switches:
                 node = Node(node_type=NodeType.OF_SWITCH, datapath=sw.dp,
-                            neighbours={}, ports={port.port_no: SimplePort(port.dpid, port.port_no, port.hw_addr, 10, 0) for port in sw.ports})
+                            neighbours={}, ports={port.port_no: SimplePort(port.dpid, port.port_no, port.hw_addr) for port in sw.ports})
 
                 existing = self._node_graph.get(sw.dp.id)
                 if existing is not None:
