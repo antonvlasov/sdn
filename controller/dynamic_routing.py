@@ -38,11 +38,12 @@ topo = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(topo)
 
 UINT64_MAX = 18446744073709551616
+FLOW_COST = 1
 
 random.seed()
 
 
-def get_bandwidths(topo: topo.topology) -> Dict[int, Dict[int, int]]:
+def init_bandwidths(topo: topo.topology) -> Dict[int, Dict[int, int]]:
     result = {}
     for edge in topo.sw_conns:
         s1, s2, bw = int(edge[0][1:]), int(edge[1][1:]), int(edge[2])
@@ -53,8 +54,13 @@ def get_bandwidths(topo: topo.topology) -> Dict[int, Dict[int, int]]:
     return result
 
 
-BANDWIDTHS = get_bandwidths(topo.topology.from_csv(
-    "/home/mininet/project/data/topology.csv"))
+_BANDWIDTHS = init_bandwidths(topo.topology.from_csv(
+    "/home/mininet/project/data/scenario/topology.csv"))
+
+
+def GET_BANDWIDTH(src: int, dst: int) -> int:
+    return 10
+    return _BANDWIDTHS[src][dst]
 
 
 class NodeType(Enum):
@@ -173,14 +179,16 @@ class NetGraph:
     _node_graph: Dict[int, Node]
     _hosts: Dict[str, SimpleHost]
     _broadcast_targets: Set[Tuple[Datapath, int]]  # datapath and port_no
+    _routes: Dict[int, Dict[int, List[SimplePort]]]
 
     def __init__(self, logger) -> None:
         self.logger = logger
 
         self._node_graph = {}  # datapath.id to Node
         self._hosts = {}  # mac to host
-        self.mutex = hub.BoundedSemaphore()
         self._broadcast_targets = set()
+        self._routes = {}
+        self.mutex = hub.BoundedSemaphore()
 
     def _update_broadcast_targets(self):
         targets = set()
@@ -207,7 +215,8 @@ class NetGraph:
             self.mutex.acquire()
             for l in links:
                 self._node_graph[l.src.dpid].neighbours[l.src.port_no] = self._node_graph[l.dst.dpid]
-                self._node_graph[l.src.dpid].ports[l.src.port_no].max_load = BANDWIDTHS[l.src.dpid][l.dst.dpid]
+                self._node_graph[l.src.dpid].ports[l.src.port_no].max_load += GET_BANDWIDTH(
+                    l.src.dpid, l.dst.dpid)
         finally:
             self.mutex.release()
 
@@ -252,7 +261,7 @@ class NetGraph:
     def get_node(self, dpid: int) -> Node:
         return self._node_graph.get(dpid)
 
-    def get_route(self, src_mac: int, dst_mac: int, load: float = 0) -> List[Port]:
+    def get_route(self, src_mac: int, dst_mac: int, load: float = FLOW_COST) -> List[SimplePort]:
         # get connected switches
         src_host = self._hosts.get(src_mac)
         dst_host = self._hosts.get(dst_mac)
@@ -260,22 +269,38 @@ class NetGraph:
             return None
         src_dpid = src_host.port.dpid
         dst_dpid = dst_host.port.dpid
+        known = self._routes.setdefault(src_dpid, {}).get(dst_dpid)
+        if known is not None:
+            return known
 
-        path: List[SimplePort] = None
+        route: List[SimplePort] = None
         try:
             self.mutex.acquire()
-            path = self.bfs(src_dpid, dst_dpid, load)
+            route = self.bfs(src_dpid, dst_dpid, load)
         finally:
             self.mutex.release()
-        if path is None:
+        if route is None:
             # TODO : what if hosts are on same switch?
             return None
 
         # add path from last switch to dst host
-        path.insert(0, dst_host.port)
-        for port in path:
+        route.insert(0, dst_host.port)
+        for port in route:
             port.load += load
-        return path
+        self._routes[src_dpid][dst_dpid] = route
+        return route
+
+    def defer_load_decrement(self, route: List[SimplePort], delay_seconds: float, load: int = FLOW_COST):
+        hub.spawn(self._decrement_load, route,  delay_seconds, load)
+
+    def _decrement_load(self, route: List[SimplePort], delay_seconds: float, load: int):
+        hub.sleep(delay_seconds)
+        try:
+            self.mutex.acquire()
+            for port in route:
+                port.load -= load
+        finally:
+            self.mutex.release()
 
     def bfs(self, src_dpid: int, dst_dpid: int, load: float = 0) -> List[SimplePort]:
         visited: List[int] = []  # List to keep track of visited nodes.
@@ -321,6 +346,8 @@ class NetGraph:
 
 class MULTIPATH_13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+
+    HARD_TIMEOUT = 10
 
     def __init__(self, *args, **kwargs):
         super(MULTIPATH_13, self).__init__(*args, **kwargs)
@@ -484,29 +511,30 @@ class MULTIPATH_13(app_manager.RyuApp):
 
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
-        path = self.net_graph.get_route(eth.src, eth.dst, 6)
+        path = self.net_graph.get_route(eth.src, eth.dst)
 
         # try one more time because graph could have been not updated
         if path is None:
             self.update_switches()
-            path = self.net_graph.get_route(eth.src, eth.dst, 6)
+            path = self.net_graph.get_route(eth.src, eth.dst)
         if path is None:
             self.logger.info(
                 "could not create path from %s to %s", eth.src, eth.dst)
             # for debug
-            path = self.net_graph.get_route(eth.src, eth.dst, 6)
+            path = self.net_graph.get_route(eth.src, eth.dst)
             return
 
         # add flows to all switches in route
 
         cookie = randint(0, UINT64_MAX)
         print(f"cookie: {cookie}")
+        self.net_graph.defer_load_decrement(path, self.HARD_TIMEOUT)
         for path_node in path:
             actions = [parser.OFPActionOutput(path_node.port_no)]
             match = parser.OFPMatch(eth_src=eth.src,
                                     eth_dst=eth.dst, eth_type=eth.ethertype)
             dp = self.net_graph.get_node(path_node.dpid).datapath
-            self.add_flow(dp, 0, 1, match, actions, cookie)
+            self.add_flow(dp, self.HARD_TIMEOUT, 1, match, actions, cookie)
         # wait for flows to apply
         hub.sleep(0.05)
 
@@ -578,7 +606,7 @@ class MULTIPATH_13(app_manager.RyuApp):
         while True:
             hub.sleep(5)
             # self.net_graph.call_on_all_nodes(request_stats)
-            self.net_graph.call_on_all_nodes(send_latency_probe)
+            # self.net_graph.call_on_all_nodes(send_latency_probe)
 
     @ set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def port_stats_reply_handler(self, ev):

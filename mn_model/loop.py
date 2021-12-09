@@ -6,10 +6,6 @@ from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.link import TCLink
 
-# topo = topology()
-# topo.addCells(3, 5)
-# print(topo.sw_conns)
-
 
 class MyTopo(Topo):
     "Simple loop topology example."
@@ -35,32 +31,28 @@ class MyTopo(Topo):
 
 
 def StartServices(network):
-    hosts = sorted([h for h in network.hosts], key=lambda x: x.IP())
-    targets = [h.IP()+":6000" for h in hosts]
-
-    for i, h in enumerate(hosts):
-        tt = list(targets)
-        del tt[i]
-        targets_arg = ','.join(map(str, tt))
-
+    for h in network.hosts:
         cmd = ' '.join(
-            ['/home/mininet/project/host_service/host-service', '6000', '/home/mininet/project/host_service/control', targets_arg, '&'])
+            ['/home/mininet/project/host_service/host-service',
+             '-port', '6000',
+             '-pair.csv', '/home/mininet/project/data/scenario/pairs.csv',
+             '-host-number', h.name[1:],
+             '-dataflow.csv', '/home/mininet/project/data/scenario/dataflows.csv',
+             '-time-koefficient', "70",
+             '&'])
         res = h.cmd(cmd)
         if res != "":
             print(res)
-    # min_ip, max_ip = "", ""
-    # if len(network.hosts) > 0:
-    #     min_ip = network.hosts[0].IP()
-    #     max_ip = network.hosts[len(network.hosts)-1].IP()
-    # client = 'python3 -m counting_server.client -s {} -e {} &'.format(
-    #     min_ip, max_ip)
-    # for host in network.hosts:
-    #     host.cmd(client)
 
 
 if __name__ == "__main__":
     lg.setLogLevel('info')
-    topo = topology.from_csv("/home/mininet/project/data/topology.csv")
+
+    # topo = topology.from_csv(
+    #    "/home/mininet/project/data/scenario/topology.csv")
+    topo = topology()
+    topo.addCells(2, 2, 10)
+
     net = Mininet(topo=MyTopo(topo), controller=RemoteController(
         'ryu', port=6653), autoSetMacs=True, link=TCLink)
     net.start()
