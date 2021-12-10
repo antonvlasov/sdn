@@ -12,6 +12,7 @@ from ryu.lib.packet import arp
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import ipv6
 from ryu import utils
+import dill
 
 from ryu.lib import hub
 from typing import Callable, Dict, Optional, Any, List, Set, Tuple
@@ -39,6 +40,8 @@ spec.loader.exec_module(topo)
 
 UINT64_MAX = 18446744073709551616
 FLOW_COST = 1
+SNAPSHOT_DIR = '/home/mininet/project/data/snaps'
+SNAPSHOT_INTERVAL_SECONDS = 0.5
 
 random.seed()
 
@@ -90,6 +93,14 @@ class Node:
     datapath: Optional[Datapath]
     neighbours: Dict[int, 'Node'] = field(default_factory=dict)  # port to node
     ports: Dict[int, SimplePort] = field(default_factory=dict)
+    _id: int = 0  # for unpickling only
+
+    def __getstate__(self):
+        return (self.node_type, self.datapath.id, self.neighbours, self.ports)
+
+    def __setstate__(self, state):
+        self.node_type, self._id, self.neighbours, self.ports = state
+        self.datapath = None
 
 
 class ArpDispatcher:
@@ -190,6 +201,21 @@ class NetGraph:
         self._routes = {}
         self.mutex = hub.BoundedSemaphore()
 
+        hub.spawn(self._snapshot_state_loop)
+
+    def _snapshot_state_loop(self):
+        counter = 0
+        while True:
+            hub.sleep(SNAPSHOT_INTERVAL_SECONDS)
+            with open(SNAPSHOT_DIR+str(counter), 'wb') as f:
+                try:
+                    self.mutex.acquire()
+                    dill.dump(self._node_graph, f)
+                    # dill.dumps
+                finally:
+                    self.mutex.release()
+            counter += 1
+
     def _update_broadcast_targets(self):
         targets = set()
         for node in self._node_graph.values():
@@ -215,7 +241,7 @@ class NetGraph:
             self.mutex.acquire()
             for l in links:
                 self._node_graph[l.src.dpid].neighbours[l.src.port_no] = self._node_graph[l.dst.dpid]
-                self._node_graph[l.src.dpid].ports[l.src.port_no].max_load += GET_BANDWIDTH(
+                self._node_graph[l.src.dpid].ports[l.src.port_no].max_load = GET_BANDWIDTH(
                     l.src.dpid, l.dst.dpid)
         finally:
             self.mutex.release()
