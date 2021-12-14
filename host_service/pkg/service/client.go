@@ -22,11 +22,13 @@ type DataFlowDescription struct {
 	Capacity int
 	URL      string
 }
+
 type Config struct {
 	TimeKoef   float64
 	Schedule   []DataFlowDescription
 	HostNumber string
 }
+
 type client struct {
 	cfg      Config
 	c        http.Client
@@ -66,6 +68,7 @@ func newClient(port int, pairPath, hostNumber, dataflowPath string, timeKoeffici
 	}
 	return &c, nil
 }
+
 func (r *client) setLogger(hostNumber string) error {
 	dst, err := os.OpenFile(path.Join(
 		logPath, fmt.Sprintf("client-%v.log", hostNumber)), os.O_WRONLY|os.O_CREATE, 0777)
@@ -73,9 +76,10 @@ func (r *client) setLogger(hostNumber string) error {
 		return err
 	}
 	r.onStop = append(r.onStop, dst.Close)
-	r.logger = *log.New(dst, "", 1)
+	r.logger = *log.New(dst, "", log.Ltime)
 	return nil
 }
+
 func createPayloads(schedule []DataFlowDescription) map[int][]byte {
 	res := make(map[int][]byte)
 	for _, desc := range schedule {
@@ -113,6 +117,7 @@ func getULRsForPairs(port int, pairPath, srcHostNumber string) (map[string]strin
 	}
 	return pairToURL, onCSV(pairPath, 3, cb)
 }
+
 func createSchedule(dataflowPath string, timeKoefficient float64, pairToURL map[string]string) ([]DataFlowDescription, error) {
 	var res []DataFlowDescription
 	cb := func(record []string) error {
@@ -141,9 +146,10 @@ func createSchedule(dataflowPath string, timeKoefficient float64, pairToURL map[
 		res = append(res, d)
 		return nil
 	}
-	//TODO: now assuming flows are sorted by start. Sort
+	// TODO: now assuming flows are sorted by start. Sort
 	return res, onCSV(dataflowPath, 4, cb)
 }
+
 func (r *client) run() error {
 	r.ticker = *time.NewTicker(time.Duration(float64(time.Second) / r.cfg.TimeKoef))
 
@@ -159,6 +165,7 @@ func (r *client) run() error {
 		}
 	}
 }
+
 func (r *client) stop() []error {
 	var errs []error
 	for _, f := range r.onStop {
@@ -173,12 +180,14 @@ func ClearResponse(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 }
+
 func (r *client) sendMessage(description DataFlowDescription) error {
 	req, err := http.NewRequest("PUT", description.URL, bytes.NewReader(r.payloads[description.Capacity]))
 	if err != nil {
 		return err
 	}
 
+	r.logger.Printf("sending message to %v\n", description.URL)
 	go r.c.Do(req)
 	// resp, err := r.c.Do(req)
 	// if err != nil {
@@ -192,6 +201,7 @@ func (r *client) sendMessage(description DataFlowDescription) error {
 	// }
 	return nil
 }
+
 func (r *client) sendMessages() error {
 	t := time.Now()
 	if len(r.cfg.Schedule) == 0 {

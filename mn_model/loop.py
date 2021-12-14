@@ -1,7 +1,7 @@
 from mininet.log import lg
 from mininet.node import RemoteController
 from mininet.cli import CLI
-from net_topo.topo import topology
+from net_topo.topo import topology, CenteredTopo
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.link import TCLink
@@ -37,8 +37,8 @@ def StartServices(network):
              '-port', '6000',
              '-pair.csv', '/home/mininet/project/data/scenario/pairs.csv',
              '-host-number', h.name[1:],
-             '-dataflow.csv', '/home/mininet/project/data/scenario/dataflows.csv',
-             '-time-koefficient', "70",
+             '-dataflow.csv', '/home/mininet/project/data/scenario/shortflows.csv',
+             '-time-koefficient', "1",
              '&'])
         res = h.cmd(cmd)
         if res != "":
@@ -48,14 +48,15 @@ def StartServices(network):
 if __name__ == "__main__":
     lg.setLogLevel('info')
 
-    # topo = topology.from_csv(
-    #    "/home/mininet/project/data/scenario/topology.csv")
-    topo = topology()
-    topo.addCells(2, 2, 10)
+    topo = topology.from_csv(
+        "/home/mininet/project/data/scenario/topology.csv")
+    # topo = topology()
+    # topo.addCells(5, 4, 10)
+    # topo = CenteredTopo(30, 1)
 
     net = Mininet(topo=MyTopo(topo), controller=RemoteController(
         'ryu', port=6653), autoSetMacs=True, link=TCLink)
     net.start()
-    # StartServices(net)
+    StartServices(net)
     CLI(net)
     net.stop()

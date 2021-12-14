@@ -13,6 +13,7 @@ from ryu.lib.packet import ipv4
 from ryu.lib.packet import ipv6
 from ryu import utils
 import dill
+import os
 
 from ryu.lib import hub
 from typing import Callable, Dict, Optional, Any, List, Set, Tuple
@@ -38,12 +39,19 @@ spec = importlib.util.spec_from_file_location(
 topo = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(topo)
 
+random.seed()
+
 UINT64_MAX = 18446744073709551616
 FLOW_COST = 1
-SNAPSHOT_DIR = '/home/mininet/project/data/snaps'
+SNAPSHOT_DIR = '/home/mininet/project/data/snaps/'
 SNAPSHOT_INTERVAL_SECONDS = 0.5
+LATENCY_PROBE = 0x07c3
+SIMPLE_LLDP = 0x88CC
 
-random.seed()
+
+def GET_BANDWIDTH(src: int, dst: int) -> int:
+    return 10
+    return _BANDWIDTHS[src][dst]
 
 
 def init_bandwidths(topo: topo.topology) -> Dict[int, Dict[int, int]]:
@@ -59,11 +67,6 @@ def init_bandwidths(topo: topo.topology) -> Dict[int, Dict[int, int]]:
 
 _BANDWIDTHS = init_bandwidths(topo.topology.from_csv(
     "/home/mininet/project/data/scenario/topology.csv"))
-
-
-def GET_BANDWIDTH(src: int, dst: int) -> int:
-    return 10
-    return _BANDWIDTHS[src][dst]
 
 
 class NodeType(Enum):
@@ -154,9 +157,6 @@ class ArpDispatcher:
             self._mu.release()
 
 
-LATENCY_PROBE = 0x07c3
-
-
 class LatencyProbePacket(packet_base.PacketBase):
     _PACK_STR = '!Q'
     _MIN_LEN = struct.calcsize(_PACK_STR)
@@ -186,6 +186,36 @@ class LatencyProbePacket(packet_base.PacketBase):
 packet_base.PacketBase.register_packet_type(LatencyProbePacket, LATENCY_PROBE)
 
 
+class SimpleLLDPPacket(packet_base.PacketBase):
+    _PACK_STR = '!II'
+    _MIN_LEN = struct.calcsize(_PACK_STR)
+    _TYPE = {
+        'ascii': [
+            'src_dpid',
+            'src_port_no'
+        ]
+    }
+
+    src_dpid: int
+    src_port_no: int
+
+    def __init__(self, src_dpid: int, src_port_no: int):
+        super().__init__()
+        self.src_dpid = src_dpid
+        self.src_port_no = src_port_no
+
+    @ classmethod
+    def parser(cls, buf):
+        src_dpid, src_port_no = struct.unpack_from(cls._PACK_STR, buf)
+        return cls(src_dpid, src_port_no), None, buf[cls._MIN_LEN:]
+
+    def serialize(self, payload, prev):
+        return struct.pack(self._PACK_STR, self.src_dpid, self.src_port_no)
+
+
+packet_base.PacketBase.register_packet_type(SimpleLLDPPacket, LATENCY_PROBE)
+
+
 class NetGraph:
     _node_graph: Dict[int, Node]
     _hosts: Dict[str, SimpleHost]
@@ -207,61 +237,64 @@ class NetGraph:
         counter = 0
         while True:
             hub.sleep(SNAPSHOT_INTERVAL_SECONDS)
-            with open(SNAPSHOT_DIR+str(counter), 'wb') as f:
+            if len(self._node_graph) == 0:
+                continue
+            with open(os.path.join(SNAPSHOT_DIR, str(counter)), 'wb') as f:
                 try:
                     self.mutex.acquire()
                     dill.dump(self._node_graph, f)
-                    # dill.dumps
                 finally:
                     self.mutex.release()
             counter += 1
 
-    def _update_broadcast_targets(self):
-        targets = set()
-        for node in self._node_graph.values():
-            non_switch_ports = node.ports.keys()-node.neighbours.keys()
-            for port in non_switch_ports:
-                targets.add((node.datapath, port))
-        self._broadcast_targets = targets
-
-    def update_switches(self, switches: List[Switch], links: List[Link]):
-        self._update_nodes(switches)
-        self._update_links(links)
-        self._update_broadcast_targets()
-
-        print(" \t" + "Saved Links:")
-        for dpid, s in self._node_graph.items():
-            for port, l in s.neighbours.items():
-                print(" \t\t dpid: {}, port: {} dpid: {}".format(
-                    dpid, port, l.datapath.id))
-            print()
-
-    def _update_links(self, links: List[Link]):
+    def add_ports(self, ports: List[SimplePort]):
+        if len(ports) == 0:
+            return
         try:
             self.mutex.acquire()
-            for l in links:
-                self._node_graph[l.src.dpid].neighbours[l.src.port_no] = self._node_graph[l.dst.dpid]
-                self._node_graph[l.src.dpid].ports[l.src.port_no].max_load = GET_BANDWIDTH(
-                    l.src.dpid, l.dst.dpid)
+            for port in ports:
+                self._add_port_to_switch(port)
         finally:
             self.mutex.release()
 
-    def _update_nodes(self, switches: List[Switch]):
+    def add_switch(self, datapath: Datapath):
         try:
             self.mutex.acquire()
-            for sw in switches:
-                node = Node(node_type=NodeType.OF_SWITCH, datapath=sw.dp,
-                            neighbours={}, ports={port.port_no: SimplePort(port.dpid, port.port_no, port.hw_addr) for port in sw.ports})
-
-                existing = self._node_graph.get(sw.dp.id)
-                if existing is not None:
-                    for port_no, port in existing.ports.items():
-                        node.ports[port_no] = port
-                self._node_graph[sw.dp.id] = node
+            if self._node_graph.get(datapath.id) is not None:
+                return
+            node = Node(node_type=NodeType.OF_SWITCH, datapath=datapath,
+                        neighbours={}, ports={})
+            self._node_graph[node.datapath.id] = node
         finally:
             self.mutex.release()
 
-    def host_learning(self, src_mac, ipv4, dpid, in_port):
+    def _add_port_to_switch(self, port: SimplePort):
+        if port not in self._node_graph[port.dpid].ports.values():
+            self._node_graph[port.dpid].ports[port.port_no] = port
+
+    def _add_neighbour(self, src_dpid: int, src_port_no: int, dst_dpid: int):
+        existing_path = next(iter([port_no for port_no, node in self._node_graph[src_dpid].neighbours.items(
+        ) if node.datapath.id == dst_dpid]), None)
+        if existing_path is not None:
+            if existing_path != src_port_no:
+                raise Exception("same neighbour on different ports")
+            return
+
+        self._node_graph[src_dpid].neighbours[src_port_no] = self._node_graph[dst_dpid]
+        self._node_graph[src_dpid].ports[src_port_no].max_load = GET_BANDWIDTH(
+            src_dpid, dst_dpid)
+
+    def add_link(self, dpid0: int, port_no0: int, dpid1: int, port_no1: int):
+        try:
+            self.mutex.acquire()
+            self._add_neighbour(dpid0, port_no0, dpid1)
+            self._add_neighbour(dpid1, port_no1, dpid0)
+        finally:
+            self.mutex.release()
+
+    def host_learning(self, src_mac: str, ipv4: str, port: SimplePort):
+        dpid = port.dpid
+        in_port = port.port_no
         if self._hosts.get(src_mac) is None:
             try:
                 self.mutex.acquire()
@@ -271,13 +304,12 @@ class NetGraph:
                     return
 
                 self.logger.info(f"adding host {src_mac}")
-                port = node.ports.get(in_port)
-                if port is None:
-                    self.logger.info(f"no port known for port {in_port}")
-                    return
+                self._add_port_to_switch(port)
                 h = SimpleHost(src_mac, ipv4,
                                port)
                 self._hosts[src_mac] = h
+
+                self._broadcast_targets.add((node.datapath, in_port))
             finally:
                 self.mutex.release()
 
@@ -295,26 +327,33 @@ class NetGraph:
             return None
         src_dpid = src_host.port.dpid
         dst_dpid = dst_host.port.dpid
-        known = self._routes.setdefault(src_dpid, {}).get(dst_dpid)
-        if known is not None:
-            return known
 
         route: List[SimplePort] = None
         try:
             self.mutex.acquire()
+            self._routes.setdefault(src_dpid, {})
+            if self._routes[src_dpid].get(dst_dpid) is not None:
+                return self._routes[src_dpid].get(dst_dpid)
+
             route = self.bfs(src_dpid, dst_dpid, load)
+            if route is None:
+                # TODO : what if hosts are on same switch?
+                return None
+
+            # add path from last switch to dst host
+            route.insert(0, dst_host.port)
+            self._routes[src_dpid][dst_dpid] = route
+            print(f'set route {src_dpid} to {dst_dpid}: {route}')
         finally:
             self.mutex.release()
-        if route is None:
-            # TODO : what if hosts are on same switch?
-            return None
-
-        # add path from last switch to dst host
-        route.insert(0, dst_host.port)
-        for port in route:
-            port.load += load
-        self._routes[src_dpid][dst_dpid] = route
         return route
+
+    def increment_load(self, route: List[SimplePort], load: float = FLOW_COST):
+        for port in route:
+            if self._node_graph[port.dpid].neighbours.get(port.port_no) is None:
+                # port to host
+                continue
+            port.load += load
 
     def defer_load_decrement(self, route: List[SimplePort], delay_seconds: float, load: int = FLOW_COST):
         hub.spawn(self._decrement_load, route,  delay_seconds, load)
@@ -324,7 +363,12 @@ class NetGraph:
         try:
             self.mutex.acquire()
             for port in route:
+                if self._node_graph[port.dpid].neighbours.get(port.port_no) is None:
+                    # port to host
+                    continue
                 port.load -= load
+                if port.load < 0:
+                    raise Exception("load<0")
         finally:
             self.mutex.release()
 
@@ -373,7 +417,7 @@ class NetGraph:
 class MULTIPATH_13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
-    HARD_TIMEOUT = 10
+    HARD_TIMEOUT = 0
 
     def __init__(self, *args, **kwargs):
         super(MULTIPATH_13, self).__init__(*args, **kwargs)
@@ -402,6 +446,10 @@ class MULTIPATH_13(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, 0, match, actions)
+
+        self.net_graph.add_switch(datapath)
+        self.lldp_query(datapath)
+        self.request_port_desc(datapath)
         self.logger.info("switch:%s connected", dpid)
 
     def add_flow(self, datapath, hard_timeout, priority, match, actions, cookie=0):
@@ -520,7 +568,7 @@ class MULTIPATH_13(app_manager.RyuApp):
         in_port = msg.match['in_port']
 
         self.net_graph.host_learning(
-            arp_pkt.src_mac, arp_pkt.src_ip, dpid, in_port)
+            arp_pkt.src_mac, arp_pkt.src_ip, SimplePort(dpid, in_port, datapath.ports[in_port].hw_addr))
 
         if arp_pkt.opcode == arp.ARP_REQUEST:
             self._handle_arp_req(arp_pkt)
@@ -541,34 +589,36 @@ class MULTIPATH_13(app_manager.RyuApp):
 
         # try one more time because graph could have been not updated
         if path is None:
-            self.update_switches()
             path = self.net_graph.get_route(eth.src, eth.dst)
+
         if path is None:
             self.logger.info(
                 "could not create path from %s to %s", eth.src, eth.dst)
-            # for debug
             path = self.net_graph.get_route(eth.src, eth.dst)
             return
 
         # add flows to all switches in route
 
-        cookie = randint(0, UINT64_MAX)
-        print(f"cookie: {cookie}")
+        #cookie = randint(0, UINT64_MAX)
+        print(f"adding flow {eth.src} to {eth.dst}")
+        self.net_graph.increment_load(path)
         self.net_graph.defer_load_decrement(path, self.HARD_TIMEOUT)
         for path_node in path:
             actions = [parser.OFPActionOutput(path_node.port_no)]
             match = parser.OFPMatch(eth_src=eth.src,
                                     eth_dst=eth.dst, eth_type=eth.ethertype)
             dp = self.net_graph.get_node(path_node.dpid).datapath
-            self.add_flow(dp, self.HARD_TIMEOUT, 1, match, actions, cookie)
+            self.add_flow(dp, self.HARD_TIMEOUT, 1, match, actions)
         # wait for flows to apply
-        hub.sleep(0.05)
+        # hub.sleep(0.05)
 
         # current switch out port
-        out_port = path[-1].port_no
+        out = [
+            port for port in path if port.dpid == datapath.id][0]
+        print(f'out:{out}')
         # send this packet through the right port
         self.send_packet_out(datapath, msg.buffer_id, in_port,
-                             out_port, msg.data)
+                             out.port_no, msg.data)
 
     @ set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -590,82 +640,87 @@ class MULTIPATH_13(app_manager.RyuApp):
         if isinstance(ip_pkt, ipv4.ipv4):
             self._handle_ip(msg)
 
-        eth = pkt.get_protocols(ethernet.ethernet)[0]
-        if eth.ethertype == LATENCY_PROBE:
-            packet.Packet(msg.data)
-            print(f'receiving {pkt.protocols}')
-            latency_probe_pkt = pkt.get_protocol(LatencyProbePacket)
-            if isinstance(latency_probe_pkt, LatencyProbePacket):
-                print(pkt)
+        latency_probe_pkt = pkt.get_protocol(LatencyProbePacket)
+        if isinstance(latency_probe_pkt, LatencyProbePacket):
+            print(pkt)
+
+        lldp_pkt = pkt.get_protocol(SimpleLLDPPacket)
+        if isinstance(lldp_pkt, SimpleLLDPPacket):
+            self.handle_lldp(msg)
+
+    def request_port_desc(self, dp: Datapath):
+        ofp_parser = dp.ofproto_parser
+        req = ofp_parser.OFPPortDescStatsRequest(dp, 0)
+        self.logger.info(f"sent PortDesc request to {dp.id}")
+        dp.send_msg(req)
+
+    @ set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
+    def port_stats_reply_handler(self, ev: ofp_event.EventOFPPortDescStatsReply):
+        dp: Datapath = ev.msg.datapath
+        ports: List[SimplePort] = []
+        for p in ev.msg.body:
+            # should have obtained max speed on this step but openvswitch does not show the correct one set by mininet
+            ports.append(SimplePort(dp.id, p.port_no, p.hw_addr))
+        self.net_graph.add_ports(ports)
+
+        self.lldp_query(dp)
+
+    def send_latency_probe(self, node: Node):
+        datapath = node.datapath
+        ofproto = datapath.ofproto
+
+        for port_no in node.neighbours:
+            probe = packet.Packet()
+            probe.add_protocol(ethernet.ethernet(
+                ethertype=LATENCY_PROBE,
+                dst="11:22:33:44:55:66",
+                src="00:11:22:33:44:55"
+                # dst=node.ports[port_no].mac, #TODO: add mac to SimplePort
+            ))
+
+            probe.add_protocol(LatencyProbePacket(time.time_ns()))
+
+            probe.serialize()
+
+            self.logger.info(f'writing {probe.protocols}')
+
+            self.send_packet_out(datapath, datapath.ofproto.OFP_NO_BUFFER,
+                                 ofproto.OFPP_CONTROLLER, port_no, probe.data)
 
     def query_switches(self) -> None:
-        def request_stats(node: Node) -> None:
-            dp = node.datapath
-            ofp = dp.ofproto
-            ofp_parser = dp.ofproto_parser
-            req = ofp_parser.OFPPortStatsRequest(dp, 0, ofp.OFPP_ANY)
-            print('Sent ', req)
-            dp.send_msg(req)
-
-        def send_latency_probe(node: Node):
-            datapath = node.datapath
-            ofproto = datapath.ofproto
-
-            for port_no in node.neighbours:
-                probe = packet.Packet()
-                probe.add_protocol(ethernet.ethernet(
-                    ethertype=LATENCY_PROBE,
-                    dst="11:22:33:44:55:66",
-                    src="00:11:22:33:44:55"
-                    # dst=node.ports[port_no].mac, #TODO: add mac to SimplePort
-                ))
-
-                probe.add_protocol(LatencyProbePacket(time.time_ns()))
-
-                probe.serialize()
-
-                print(f'writing {probe.protocols}')
-
-                self.send_packet_out(datapath, datapath.ofproto.OFP_NO_BUFFER,
-                                     ofproto.OFPP_CONTROLLER, port_no, probe.data)
 
         while True:
             hub.sleep(5)
             # self.net_graph.call_on_all_nodes(request_stats)
             # self.net_graph.call_on_all_nodes(send_latency_probe)
 
-    @ set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
-    def port_stats_reply_handler(self, ev):
-        ports = []
-        for stat in ev.msg.body:
-            ports.append('port_no=%d '
-                         'rx_packets=%d tx_packets=%d '
-                         'rx_bytes=%d tx_bytes=%d '
-                         'rx_dropped=%d tx_dropped=%d '
-                         'rx_errors=%d tx_errors=%d '
-                         'rx_frame_err=%d rx_over_err=%d rx_crc_err=%d '
-                         'collisions=%d duration_sec=%d duration_nsec=%d' %
-                         (stat.port_no,
-                          stat.rx_packets, stat.tx_packets,
-                          stat.rx_bytes, stat.tx_bytes,
-                          stat.rx_dropped, stat.tx_dropped,
-                          stat.rx_errors, stat.tx_errors,
-                          stat.rx_frame_err, stat.rx_over_err,
-                          stat.rx_crc_err, stat.collisions,
-                          stat.duration_sec, stat.duration_nsec))
-            print(ports[-1])
-            print()
-        # print('PortStats: ', ports)
+    def lldp_query(self, datapath: Datapath):
+        ofproto = datapath.ofproto
+        for port in self.net_graph.get_node(datapath.id
+                                            ).ports.values():
+            lldp = packet.Packet()
+            lldp.add_protocol(ethernet.ethernet(
+                ethertype=LATENCY_PROBE,
+                dst="FF:FF:FF:FF:FF:FF",
+                src=port.mac
+            ))
 
-    @ set_ev_cls(event.EventSwitchEnter)
-    def handler_switch_enter(self, ev):
-        self.logger.info(f"new switch entered: {ev.switch.dp.id}")
-        self.update_switches()
+            lldp.add_protocol(SimpleLLDPPacket(datapath.id, port.port_no))
 
-    def update_switches(self):
-        switches = copy.copy(get_switch(self))
-        links = copy.copy(get_link(self))
+            lldp.serialize()
 
-        self.net_graph.update_switches(switches, links)
+            self.send_packet_out(datapath, datapath.ofproto.OFP_NO_BUFFER,
+                                 ofproto.OFPP_CONTROLLER, port.port_no, lldp.data)
 
-        # self.query_ports_description() #port description has false information
+    def handle_lldp(self, msg):
+        self.logger.debug("recieved lldp")
+
+        pkt = packet.Packet(msg.data)
+        lldp_pkt: SimpleLLDPPacket = pkt.get_protocol(SimpleLLDPPacket)
+
+        datapath = msg.datapath
+        dpid = datapath.id
+        in_port = msg.match['in_port']
+
+        self.net_graph.add_link(
+            lldp_pkt.src_dpid, lldp_pkt.src_port_no, dpid, in_port)

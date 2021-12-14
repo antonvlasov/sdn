@@ -147,4 +147,4 @@ def randomize_load(node_graph: Dict[int, Node]):
 
 if __name__ == "__main__":
     make_gif(SNAPSHOT_DIR,
-             os.path.join(ANIMATION_DIR, 'load_random.gif'), True)
+             os.path.join(ANIMATION_DIR, 'load_large.gif'))

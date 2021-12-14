@@ -46,10 +46,26 @@ class topology:
             res.addEndpoint()
         for i in range(len(matrix)):
             cols = np.where(matrix[i] != 0)
-            for col in cols[0]:
+            print(cols[0])
+            cols = [col for col in cols[0] if col > i]
+            print(cols)
+            for col in cols:
                 res.sw_conns.append((
                     res.endpoints[i][1], res.endpoints[col][1], matrix[i][col]))
         return res
+
+
+class CenteredTopo:
+    def __init__(self, count, bandwidth):
+        self.endpoints = []
+        self.sw_conns = []
+
+        center = ('h1', 's1')
+        self.endpoints.append(center)
+        for i in range(2, count+2):
+            leaf = (f'h{i}', f's{i}')
+            self.endpoints.append(leaf)
+            self.sw_conns.append((center[1], leaf[1], bandwidth))
 
 
 if __name__ == "__main__":
