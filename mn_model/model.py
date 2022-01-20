@@ -1,17 +1,15 @@
 from mininet.log import lg
 from mininet.node import RemoteController
 from mininet.cli import CLI
-from net_topo.topo import topology
+from net_topo.topo import topology, CrystalTopo
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.link import TCLink
 
 
 class MyTopo(Topo):
-    "Simple loop topology example."
 
     def __init__(self, topo: topology):
-        "Create custom loop topo."
 
         # Initialize topology
         Topo.__init__(self)
@@ -50,8 +48,11 @@ if __name__ == "__main__":
 
     # topo = topology.from_csv(
     #    "/home/mininet/project/data/scenario/topology.csv")
-    topo = topology()
-    topo.addCells(2, 2, 10)
+
+    # topo = topology()
+    # topo.addCells(2, 2, 10)
+
+    topo = CrystalTopo(10)
 
     net = Mininet(topo=MyTopo(topo), controller=RemoteController(
         'ryu', port=6653), autoSetMacs=True, link=TCLink)

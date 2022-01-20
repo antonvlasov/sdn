@@ -52,7 +52,47 @@ class topology:
         return res
 
 
+class CrystalTopo:
+    def __init__(self, bandwidth):
+        self.endpoints = []
+        self.sw_conns = []
+
+        left = ('h1', 's1')
+        tl = ('h2', 's2')
+        bl = ('h3', 's3')
+        tr = ('h4', 's4')
+        br = ('h5', 's5')
+        right = ('h6', 's6')
+
+        self.endpoints = [left, tl, bl, tr, br, right]
+
+        self.sw_conns = [
+            (left[1], tl[1], bandwidth),
+            (left[1], bl[1], bandwidth),
+            (tl[1], bl[1], bandwidth),
+            (tl[1], tr[1], bandwidth),
+            (tl[1], br[1], bandwidth),
+            (bl[1], tr[1], bandwidth),
+            (bl[1], br[1], bandwidth),
+            (tr[1], br[1], bandwidth),
+            (tr[1], right[1], bandwidth),
+            (br[1], right[1], bandwidth)
+        ]
+
+        # end = len(self.sw_conns)
+        # i = 0
+        # while i < end:
+        #     self.sw_conns.append(
+        #         (self.sw_conns[i][1], self.sw_conns[i][0], bandwidth))
+        #     i += 1
+
+
 if __name__ == "__main__":
-    topo = topology.from_csv("/home/mininet/project/data/topology.csv")
+    topo = CrystalTopo(10)
     print(topo.endpoints)
     print(topo.sw_conns)
+
+    # topo = topology.from_csv(
+    #     "/home/mininet/project/data/scenario/topology.csv")
+    # print(topo.endpoints)
+    # print(topo.sw_conns)
