@@ -9,3 +9,5 @@ logs/
 snaps/
 
 host-service
+
+data/

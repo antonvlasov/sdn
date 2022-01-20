@@ -1,17 +1,15 @@
 from mininet.log import lg
 from mininet.node import RemoteController
 from mininet.cli import CLI
-from net_topo.topo import topology, CenteredTopo
+from net_topo.topo import topology, CenteredTopo, CrystalTopo
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.link import TCLink
 
 
 class MyTopo(Topo):
-    "Simple loop topology example."
 
     def __init__(self, topo: topology):
-        "Create custom loop topo."
 
         # Initialize topology
         Topo.__init__(self)
@@ -30,15 +28,16 @@ class MyTopo(Topo):
                          switches[edge[1]], cls=TCLink)
 
 
-def StartServices(network):
+def StartServices(network, measureTimeSingleTarget: bool):
     for h in network.hosts:
         cmd = ' '.join(
             ['/home/mininet/project/host_service/host-service',
              '-port', '6000',
              '-pair.csv', '/home/mininet/project/data/scenario/pairs.csv',
              '-host-number', h.name[1:],
-             '-dataflow.csv', '/home/mininet/project/data/scenario/shortflows.csv',
+             '-dataflow.csv', '/home/mininet/project/data/scenario/generated/prolonged_10.csv',
              '-time-koefficient', "1",
+             f'-measure-single={measureTimeSingleTarget}',
              '&'])
         res = h.cmd(cmd)
         if res != "":
@@ -50,13 +49,16 @@ if __name__ == "__main__":
 
     topo = topology.from_csv(
         "/home/mininet/project/data/scenario/topology.csv")
+
     # topo = topology()
     # topo.addCells(5, 4, 10)
     # topo = CenteredTopo(30, 1)
 
+    #topo = CrystalTopo(10)
+
     net = Mininet(topo=MyTopo(topo), controller=RemoteController(
         'ryu', port=6653), autoSetMacs=True, link=TCLink)
     net.start()
-    StartServices(net)
+    #StartServices(net, True)
     CLI(net)
     net.stop()

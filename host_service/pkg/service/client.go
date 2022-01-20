@@ -3,43 +3,50 @@ package service
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
 	"path"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
 
+const (
+	msgPath   = "/opinion"
+	startPath = "/start"
+	endPath   = "/end"
+)
+
 type DataFlowDescription struct {
-	Start    time.Duration
-	End      time.Duration
-	Capacity int
-	URL      string
+	Start time.Duration
+	End   time.Duration
+	URL   string
 }
 
 type Config struct {
-	TimeKoef   float64
-	Schedule   []DataFlowDescription
-	HostNumber string
+	TimeKoef     float64
+	Schedule     []DataFlowDescription
+	Name         string
+	StartDestURL string
+	EndDestURL   string
 }
 
 type client struct {
-	cfg      Config
-	c        http.Client
-	payloads map[int][]byte
-	ticker   time.Ticker
-	t0       time.Time
-	logger   log.Logger
-	onStop   []func() error
+	cfg    Config
+	c      http.Client
+	ticker time.Ticker
+	t0     time.Time
+	logger log.Logger
+	onStop []func() error
 }
 
-func newClient(port int, pairPath, hostNumber, dataflowPath string, timeKoefficient float64) (*client, error) {
+func newClient(port int, pairPath, hostNumber, dataflowPath string, timeKoefficient float64, measureTimeOnSingle, testOnLocalhost bool) (*client, error) {
 	c := client{
 		c: http.Client{
 			Transport: &http.Transport{
@@ -50,22 +57,31 @@ func newClient(port int, pairPath, hostNumber, dataflowPath string, timeKoeffici
 			Timeout: 15 * time.Second,
 		},
 		cfg: Config{
-			TimeKoef:   timeKoefficient,
-			HostNumber: hostNumber,
+			TimeKoef: timeKoefficient,
+			Name:     "client-" + hostNumber,
 		},
 	}
-	pairToURL, err := getULRsForPairs(port, pairPath, hostNumber)
+
+	pairToURL, err := getULRsForPairs(port, pairPath, hostNumber, testOnLocalhost)
 	if err != nil {
 		return nil, err
 	}
+
 	c.cfg.Schedule, err = createSchedule(dataflowPath, timeKoefficient, pairToURL)
 	if err != nil {
 		return nil, err
 	}
-	c.payloads = createPayloads(c.cfg.Schedule)
+
 	if err := c.setLogger(hostNumber); err != nil {
 		return nil, err
 	}
+
+	if measureTimeOnSingle && len(c.cfg.Schedule) > 0 {
+		addr := c.cfg.Schedule[0].URL[:len(c.cfg.Schedule[0].URL)-len(msgPath)]
+		c.cfg.StartDestURL = addr + startPath
+		c.cfg.EndDestURL = addr + endPath
+	}
+
 	return &c, nil
 }
 
@@ -80,24 +96,7 @@ func (r *client) setLogger(hostNumber string) error {
 	return nil
 }
 
-func createPayloads(schedule []DataFlowDescription) map[int][]byte {
-	res := make(map[int][]byte)
-	for _, desc := range schedule {
-		_, ok := res[desc.Capacity]
-		if ok {
-			continue
-		}
-
-		payload := make([]byte, desc.Capacity)
-		for i := 0; i < desc.Capacity; i++ {
-			payload[i] = byte(rand.Intn(256))
-		}
-		res[desc.Capacity] = payload
-	}
-	return res
-}
-
-func getULRsForPairs(port int, pairPath, srcHostNumber string) (map[string]string, error) {
+func getULRsForPairs(port int, pairPath, srcHostNumber string, testOnLocalhost bool) (map[string]string, error) {
 	pairToURL := make(map[string]string)
 	cb := func(record []string) error {
 		var dstHostNumber string
@@ -108,11 +107,19 @@ func getULRsForPairs(port int, pairPath, srcHostNumber string) (map[string]strin
 		} else {
 			return nil
 		}
-		addr, err := getDefaultIP(dstHostNumber)
-		if err != nil {
-			return err
+
+		var address string
+		if testOnLocalhost {
+			address = "http://localhost:" + strconv.Itoa(port)
+		} else {
+			a, err := getDefaultIP(dstHostNumber)
+			if err != nil {
+				return err
+			}
+			address = fmt.Sprintf("http://%v:%v", a.String(), strconv.Itoa(port))
 		}
-		pairToURL[record[0]] = fmt.Sprintf("http://%v:%v/opinion", addr.String(), strconv.Itoa(port))
+
+		pairToURL[record[0]] = address + msgPath
 		return nil
 	}
 	return pairToURL, onCSV(pairPath, 3, cb)
@@ -133,15 +140,10 @@ func createSchedule(dataflowPath string, timeKoefficient float64, pairToURL map[
 		if err != nil {
 			return err
 		}
-		capacity, err := strconv.Atoi(record[3])
-		if err != nil {
-			return err
-		}
 		d := DataFlowDescription{
-			Start:    time.Duration(start/timeKoefficient) * time.Second,
-			End:      time.Duration((start+lifetime)/timeKoefficient) * time.Second,
-			Capacity: capacity,
-			URL:      url,
+			Start: time.Duration(start/timeKoefficient) * time.Second,
+			End:   time.Duration((start+lifetime)/timeKoefficient) * time.Second,
+			URL:   url,
 		}
 		res = append(res, d)
 		return nil
@@ -150,13 +152,16 @@ func createSchedule(dataflowPath string, timeKoefficient float64, pairToURL map[
 	return res, onCSV(dataflowPath, 4, cb)
 }
 
+// no worker pool because there will be multiple services which will use multiple cores anyway
 func (r *client) run() error {
 	r.ticker = *time.NewTicker(time.Duration(float64(time.Second) / r.cfg.TimeKoef))
 
 	r.t0 = time.Now()
-	for {
+
+	var iteration uint64
+	for ; ; iteration += 1 {
 		<-r.ticker.C
-		if err := r.sendMessages(); err != nil {
+		if err := r.sendMessages(iteration); err != nil {
 			if err == io.EOF {
 				r.logger.Println("sent all messages")
 				return nil
@@ -181,32 +186,45 @@ func ClearResponse(resp *http.Response) {
 	resp.Body.Close()
 }
 
-func (r *client) sendMessage(description DataFlowDescription) error {
-	req, err := http.NewRequest("PUT", description.URL, bytes.NewReader(r.payloads[description.Capacity]))
+func (r *client) sendMessage(description DataFlowDescription, wg *sync.WaitGroup) error {
+	req, err := http.NewRequest("PUT", description.URL, bytes.NewReader([]byte("message")))
 	if err != nil {
 		return err
 	}
 
 	r.logger.Printf("sending message to %v\n", description.URL)
-	go r.c.Do(req)
-	// resp, err := r.c.Do(req)
-	// if err != nil {
-	// 	return err
-	// }
-	// defer ClearResponse(resp)
-
-	// if resp.StatusCode != http.StatusOK {
-	// 	log.Printf("%s\n", resp.Body)
-	// 	return fmt.Errorf("unexpected status code %v", resp.StatusCode)
-	// }
+	go func() {
+		_, _ = r.c.Do(req)
+		wg.Done()
+	}()
 	return nil
 }
 
-func (r *client) sendMessages() error {
+func (r *client) sendIteration(url string, iteration uint64) {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, iteration)
+
+	fmt.Printf("sending %v to %v\n", iteration, url)
+	req, err := http.NewRequest("PUT", url, bytes.NewReader(b))
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	_, _ = r.c.Do(req)
+}
+
+func (r *client) sendMessages(iteration uint64) error {
 	t := time.Now()
 	if len(r.cfg.Schedule) == 0 {
 		return io.EOF
 	}
+
+	if len(r.cfg.StartDestURL) > 0 {
+		go r.sendIteration(r.cfg.StartDestURL, iteration)
+	}
+
+	wg := sync.WaitGroup{}
 	for i, desc := range r.cfg.Schedule {
 		if t.After(r.t0.Add(desc.End)) {
 			r.cfg.Schedule = r.cfg.Schedule[i+1:]
@@ -216,16 +234,29 @@ func (r *client) sendMessages() error {
 			continue
 		}
 
-		if err := r.sendMessage(desc); err != nil {
+		wg.Add(1)
+		if err := r.sendMessage(desc, &wg); err != nil {
 			return err
 		}
-
 	}
+	go func() {
+		wg.Wait()
+
+		end := time.Now()
+
+		if len(r.cfg.StartDestURL) > 0 {
+			go r.sendIteration(r.cfg.EndDestURL, iteration)
+		}
+
+		if err := LogTiming(RandomID, r.cfg.Name, iteration, t.UnixNano(), end.UnixNano()); err != nil {
+			log.Fatal(err)
+		}
+	}()
 	return nil
 }
 
-func RunClient(port int, pairPath, hostNumber, dataflowPath string, timeKoefficient float64) error {
-	c, err := newClient(port, pairPath, hostNumber, dataflowPath, timeKoefficient)
+func RunClient(port int, pairPath, hostNumber, dataflowPath string, timeKoefficient float64, measureTimeOnSingle, testOnLocalhost bool) error {
+	c, err := newClient(port, pairPath, hostNumber, dataflowPath, timeKoefficient, measureTimeOnSingle, testOnLocalhost)
 	if err != nil {
 		return err
 	}

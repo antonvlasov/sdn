@@ -50,10 +50,9 @@ def distribute_by_load(groups_by_load: List[Tuple[Set[str], str]], port: PortLoa
     groups_by_load[idx][0].add(port.name)
 
 
-def update_graph(g: nx.Graph, node_graph: Dict[int, Node]):
+def update_graph(g: nx.Graph, node_graph: Dict[int, Node], limit: int = None):
     if len(node_graph) == 0:
         return
-
     visited: List[int] = []  # List to keep track of visited nodes.
     queue: List[int] = [list(node_graph)[0]]  # Initialize a queue
 
@@ -70,6 +69,8 @@ def update_graph(g: nx.Graph, node_graph: Dict[int, Node]):
         for port_no, node in node_graph[cur].neighbours.items():
             if NodeType(node.node_type) == NodeType.OF_SWITCH \
                     and node._id not in visited:
+                if limit is None or cur > limit:
+                    continue
                 dst_port_no = [
                     port_no for port_no in node.neighbours if node.neighbours[port_no]._id == cur][0]
                 distribute_by_load(
@@ -116,7 +117,7 @@ def fig2img(fig):
     return img
 
 
-def make_gif(snapshots_path: str, dst: str, randomize=False):
+def make_gif(snapshots_path: str, dst: str, randomize: bool, limit: int = None):
     g = nx.Graph()
     count = len(os.listdir(snapshots_path))
     imgs: List[Image.Image] = []
@@ -125,7 +126,7 @@ def make_gif(snapshots_path: str, dst: str, randomize=False):
             open(os.path.join(snapshots_path, str(i)), 'rb')).load()
         if randomize:
             randomize_load(node_graph)
-        update_graph(g, node_graph)
+        update_graph(g, node_graph, limit)
 
         fig = plt.gcf()
         imgs.append(fig2img(fig))
@@ -147,4 +148,4 @@ def randomize_load(node_graph: Dict[int, Node]):
 
 if __name__ == "__main__":
     make_gif(SNAPSHOT_DIR,
-             os.path.join(ANIMATION_DIR, 'load_large.gif'))
+             os.path.join(ANIMATION_DIR, 'load_20.gif'), False, None)

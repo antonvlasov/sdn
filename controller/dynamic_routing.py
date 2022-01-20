@@ -66,7 +66,7 @@ def init_bandwidths(topo: topo.topology) -> Dict[int, Dict[int, int]]:
 
 
 _BANDWIDTHS = init_bandwidths(topo.topology.from_csv(
-    "/home/mininet/project/data/scenario/topology.csv"))
+    "/home/mininet/project/data/scenario/topology.csv", 4))
 
 
 class NodeType(Enum):
@@ -234,6 +234,8 @@ class NetGraph:
         hub.spawn(self._snapshot_state_loop)
 
     def _snapshot_state_loop(self):
+        if SNAPSHOT_INTERVAL_SECONDS == 0:
+            return
         counter = 0
         while True:
             hub.sleep(SNAPSHOT_INTERVAL_SECONDS)
@@ -417,7 +419,7 @@ class NetGraph:
 class MULTIPATH_13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
-    HARD_TIMEOUT = 0
+    HARD_TIMEOUT = 10
 
     def __init__(self, *args, **kwargs):
         super(MULTIPATH_13, self).__init__(*args, **kwargs)
