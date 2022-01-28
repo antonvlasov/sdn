@@ -13,23 +13,23 @@ class topology:
         s = 's{}'.format(len(self.endpoints)+1)
         self.endpoints.append((h, s))
 
-    def addEndpointCell(self, size, bandwidth):
+    def addEndpointCell(self, size):
         for i in range(size):
             self.addEndpoint()
         for i in range(len(self.endpoints)-size, len(self.endpoints)):
             for j in range(i+1, len(self.endpoints)):
                 self.sw_conns.append(
-                    (self.endpoints[i][1], self.endpoints[j][1], bandwidth))
+                    (self.endpoints[i][1], self.endpoints[j][1]))
 
-    def addCells(self, cellSize, cellCount, bandwidth):
+    def addCells(self, cellSize, cellCount):
         for i in range(cellCount):
-            self.addEndpointCell(cellSize, bandwidth)
+            self.addEndpointCell(cellSize)
         for i in range(1, cellCount):
             self.sw_conns.append(
                 (self.endpoints[(i-1)*cellSize][1], self.endpoints[i*cellSize][1]))
         if cellCount > 2:
             self.sw_conns.append(
-                (self.endpoints[0][1], self.endpoints[-1][1], bandwidth))
+                (self.endpoints[0][1], self.endpoints[-1][1]))
 
     @classmethod
     def from_csv(cls, path):
@@ -51,11 +51,12 @@ class topology:
                     res.endpoints[i][1], res.endpoints[col][1], matrix[i][col]))
         return res
 
+    @classmethod
+    def crystal(cls):
+        res = cls()
 
-class CrystalTopo:
-    def __init__(self, bandwidth):
-        self.endpoints = []
-        self.sw_conns = []
+        res.endpoints = []
+        res.sw_conns = []
 
         left = ('h1', 's1')
         tl = ('h2', 's2')
@@ -64,20 +65,22 @@ class CrystalTopo:
         br = ('h5', 's5')
         right = ('h6', 's6')
 
-        self.endpoints = [left, tl, bl, tr, br, right]
+        res.endpoints = [left, tl, bl, tr, br, right]
 
-        self.sw_conns = [
-            (left[1], tl[1], bandwidth),
-            (left[1], bl[1], bandwidth),
-            (tl[1], bl[1], bandwidth),
-            (tl[1], tr[1], bandwidth),
-            (tl[1], br[1], bandwidth),
-            (bl[1], tr[1], bandwidth),
-            (bl[1], br[1], bandwidth),
-            (tr[1], br[1], bandwidth),
-            (tr[1], right[1], bandwidth),
-            (br[1], right[1], bandwidth)
+        res.sw_conns = [
+            (left[1], tl[1]),
+            (left[1], bl[1]),
+            (tl[1], bl[1]),
+            (tl[1], tr[1]),
+            (tl[1], br[1]),
+            (bl[1], tr[1]),
+            (bl[1], br[1]),
+            (tr[1], br[1]),
+            (tr[1], right[1]),
+            (br[1], right[1])
         ]
+
+        return res
 
         # end = len(self.sw_conns)
         # i = 0
@@ -88,7 +91,7 @@ class CrystalTopo:
 
 
 if __name__ == "__main__":
-    topo = CrystalTopo(10)
+    topo = topology.crystal()
     print(topo.endpoints)
     print(topo.sw_conns)
 

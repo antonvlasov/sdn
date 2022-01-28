@@ -1,4 +1,5 @@
 from tkinter.constants import S
+from unittest.mock import DEFAULT
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, DEAD_DISPATCHER
@@ -12,6 +13,7 @@ from ryu.lib.packet import arp
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import ipv6
 from ryu import utils
+import yaml
 
 from ryu.lib import hub
 from typing import Callable, Dict, Optional, Any, List, Set, Tuple
@@ -32,35 +34,60 @@ from random import randint
 import struct
 
 import importlib.util
-spec = importlib.util.spec_from_file_location(
-    "net_topo.topo", "/home/mininet/project/net_topo/topo.py")
-topo = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(topo)
-
-UINT64_MAX = 18446744073709551616
-FLOW_COST = 1
 
 random.seed()
 
+UINT64_MAX = 18446744073709551616
+FLOW_COST = 1
+DEFAULT_BANDWIDTH = 10
 
-def init_bandwidths(topo: topo.topology) -> Dict[int, Dict[int, int]]:
-    result = {}
-    for edge in topo.sw_conns:
-        s1, s2, bw = int(edge[0][1:]), int(edge[1][1:]), int(edge[2])
-        result.setdefault(s1, {})
-        result.setdefault(s2, {})
-        result[s1][s2] = bw
-        result[s2][s1] = bw
-    return result
+GET_BANDWIDTH = None
 
 
-_BANDWIDTHS = init_bandwidths(topo.topology.from_csv(
-    "/home/mininet/project/data/scenario/topology.csv"))
+def init_bandwidths(cfg: Dict[str, Any]) -> Callable[[int, int], int]:
+    if cfg['bandwidth'].get('csv') is not None:
+        spec = importlib.util.spec_from_file_location(
+            "net_topo.topo", "/home/mininet/project/net_topo/topo.py")
+        topo = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(topo)
+
+        def init_bandwidths(topo: topo.topology) -> Dict[int, Dict[int, int]]:
+            result = {}
+            for edge in topo.sw_conns:
+                s1, s2, bw = int(edge[0][1:]), int(
+                    edge[1][1:]), int(edge[2])
+                result.setdefault(s1, {})
+                result.setdefault(s2, {})
+                result[s1][s2] = bw
+                result[s2][s1] = bw
+            return result
+
+        _BANDWIDTHS = init_bandwidths(
+            topo.topology.from_csv(cfg['bandwidth']['csv']))
+
+        def _GET_BANDWIDTH(src: int, dst: int) -> int:
+            return _BANDWIDTHS[src][dst]
+
+        return _GET_BANDWIDTH
+    else:
+        bw = DEFAULT_BANDWIDTH
+        if cfg['bandwidth'].get('const') is not None:
+            bw = cfg['bandwidth']['const']
+
+        def _GET_BANDWIDTH(src: int, dst: int) -> int:
+            return bw
+
+        return _GET_BANDWIDTH
 
 
-def GET_BANDWIDTH(src: int, dst: int) -> int:
-    return 10
-    return _BANDWIDTHS[src][dst]
+with open("/home/mininet/project/data/cfg/controller.yaml", "r") as f:
+    try:
+        cfg: Dict[str, Any] = yaml.safe_load(f)
+        GET_BANDWIDTH = init_bandwidths(cfg)
+
+    except yaml.YAMLError as exc:
+        print(exc)
+        raise exc
 
 
 class NodeType(Enum):
