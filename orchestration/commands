@@ -1,0 +1,5 @@
+// source
+go run /home/mininet/project/host_service/cmd/service --serve-first-port 7100 --service-name server --control-port 7000
+
+// target
+go run /home/mininet/project/host_service/cmd/service --serve-first-port 7110 --request-first-port 7100 --service-name target --scenario /home/mininet/project/data/scenario/local/target.json --control-port 7001

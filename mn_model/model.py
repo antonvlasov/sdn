@@ -8,6 +8,7 @@ from mininet.net import Mininet
 from mininet.link import TCLink
 import yaml
 from typing import Dict, Any, Tuple
+import os
 
 
 class MyTopo(Topo):
@@ -31,36 +32,29 @@ class MyTopo(Topo):
                          switches[edge[1]], cls=TCLink)
 
 
-def StartServices(network, port, pair_csv, dataflow_csv, time_k):
+def StartServices(network, binary, scenario_folder, speed):
     print('starting services')
     for h in network.hosts:
         cmd = ' '.join(
-            ['/home/mininet/project/host_service/host-service',
-             '-port', port,
-             '-pair.csv', pair_csv,
-             '-host-number', h.name[1:],
-             '-dataflow.csv', dataflow_csv,
-             '-time-koefficient', time_k,
+            [binary,
+             '--scenario', os.path.join(scenario_folder, h.name+'.json'),
+             '--speed', speed,
              '&'])
         res = h.cmd(cmd)
         if res != "":
             print(res)
 
 
-def retrieve_services_settings(cfg: Dict[str, Any]) -> Tuple[str, str, str, str]:
+def retrieve_services_settings(cfg: Dict[str, Any]):
     services: Dict[str, Any] = cfg.get('services')
     if services is None:
         return None
 
-    port = str(services['port'])
-    time_k = str(services.setdefault('time-koefficient', 1))
+    binary = services['binary']
+    scenario_folder = services['scenario-folder']
+    speed = str(services.setdefault('speed', 1))
 
-    if services.get('pair-csv') is not None:
-        pair_csv = services['pair-csv']
-        dataflow_csv = services['dataflow-csv']
-        return port, pair_csv, dataflow_csv, time_k
-
-    raise Exception('unexpected services settings')
+    return binary, scenario_folder, speed
 
 
 def init_topo(cfg: Dict[str, Any]):
