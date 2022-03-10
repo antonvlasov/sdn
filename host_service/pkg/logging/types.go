@@ -1,4 +1,4 @@
-package redis
+package logging
 
 import (
 	"github.com/go-redis/redis"
@@ -6,27 +6,29 @@ import (
 
 const (
 	FieldID                     = "ID"
+	FieldTest                   = "Test"
 	FieldServer                 = "Server"
 	FieldClient                 = "Client"
 	FieldDescription            = "Description"
-	FieldReceived               = "Received"
-	FieldTotal                  = "Total"
+	FieldReceivedResponses      = "ReceivedResponses"
+	FieldTotalRequests          = "TotalRequests"
+	FieldBytes                  = "Bytes"
 	FieldRequestTimestamp       = "RequestTimestamp"
 	FieldFirstResponseTimestamp = "FirstResponseTimestamp"
 	FieldLastResponseTimestamp  = "LastResponseTimestamp"
-
-	KeyWaitGroup = "WG"
 )
 
 type RedisClient redis.Client
 
 type Task struct {
 	ID                     string
+	TestName               string
 	Server                 string
 	Client                 string
 	Description            string
-	Received               int
-	Total                  int
+	ReceivedResponses      int
+	TotalRequests          int
+	Bytes                  int
 	RequestTimestamp       string
 	FirstResponseTimestamp string
 	LastResponseTimestamp  string

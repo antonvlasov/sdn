@@ -4,18 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 const (
-	filePath = "/home/mininet/project/data/server_data/files/"
+	filePath  = "/home/mininet/project/data/server_data/files/"
+	webPath   = "/home/mininet/project/data/server_data/web/"
+	videoPath = "/home/mininet/project/data/server_data/videos/"
 )
+
+var fileDescriptors = make(map[string]*os.File)
 
 type server struct {
 	servers map[string]*http.Server
@@ -23,15 +30,27 @@ type server struct {
 }
 
 func NewServer(firstPort int) *server {
-	r := gin.Default()
+	fileServer := gin.Default()
+	webServer := gin.Default()
+	videoServer := gin.Default()
 
-	r.GET("/file/:name", serveFile)
+	fileServer.GET("/file/:name", serveFile)
+	webServer.GET("/web/:name", serveWeb)
+	videoServer.GET("/video/:name", serveVideo)
 
 	srv := server{
 		servers: map[string]*http.Server{
 			KindFile: {
 				Addr:    fmt.Sprintf(":%v", firstPort+PortOffsets[KindFile]),
-				Handler: r,
+				Handler: fileServer,
+			},
+			KindWeb: {
+				Addr:    fmt.Sprintf(":%v", firstPort+PortOffsets[KindWeb]),
+				Handler: webServer,
+			},
+			KindVideo: {
+				Addr:    fmt.Sprintf(":%v", firstPort+PortOffsets[KindVideo]),
+				Handler: videoServer,
 			},
 		},
 		wg: &sync.WaitGroup{},
@@ -88,4 +107,92 @@ func serveFile(ctx *gin.Context) {
 	}
 
 	ctx.File(filePath + name)
+}
+
+func serveWeb(ctx *gin.Context) {
+	name := ctx.Param("name")
+	if err := validateFileName(name); err != nil {
+		ginError(ctx, http.StatusBadRequest, err)
+		return
+	}
+
+	ctx.File(webPath + name)
+}
+
+func serveVideo(ctx *gin.Context) {
+	var (
+		req  VideoRequest
+		resp VideoResponse
+		f    *os.File
+		err  error
+	)
+
+	if err = ctx.BindJSON(&req); err != nil {
+		ginError(ctx, http.StatusBadRequest, err)
+		return
+	}
+
+	log.Println(req)
+
+	if err := validateFileName(req.Name); err != nil {
+		ginError(ctx, http.StatusBadRequest, err)
+		return
+	}
+
+	if req.ID != "" {
+		f = fileDescriptors[req.ID]
+	}
+
+	if f == nil {
+		f, err = os.Open(videoPath + req.Name)
+		if err != nil {
+			ginError(ctx, http.StatusBadRequest, err)
+			return
+		}
+
+		resp.ID = uuid.NewString()
+		fileDescriptors[resp.ID] = f
+	} else {
+		resp.ID = req.ID
+	}
+
+	log.Println("got descriptor")
+
+	if _, err = f.Seek(req.Offset, 0); err != nil {
+		ginError(ctx, http.StatusBadRequest, err)
+		return
+	}
+
+	log.Println("assumed the position")
+
+	b := make([]byte, req.Length)
+
+	n, err := f.Read(b)
+	if err != nil && err != io.EOF {
+		ginError(ctx, http.StatusBadRequest, err)
+		return
+	}
+
+	log.Println("read portion")
+
+	if n < int(req.Length) || err == io.EOF {
+		log.Println("got to the end of file")
+
+		if err = fileDescriptors[resp.ID].Close(); err != nil {
+			ginError(ctx, http.StatusInternalServerError, err)
+			return
+		}
+
+		delete(fileDescriptors, resp.ID)
+	}
+
+	log.Println(n)
+
+	resp.Bytes = b[:n]
+
+	log.Println("writing response...")
+
+	ctx.JSON(http.StatusOK, resp)
+
+	log.Println("wrote response")
 }

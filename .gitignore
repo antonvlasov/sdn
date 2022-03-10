@@ -1,6 +1,7 @@
 venv/
 
 .vscode/
+*.code-workspace
 
 __pycache__/
 test.py
@@ -10,3 +11,4 @@ logs/
 data/
 
 service
+test

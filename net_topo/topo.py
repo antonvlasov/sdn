@@ -1,6 +1,7 @@
 import csv
 import pandas as pd
 import numpy as np
+import random
 
 
 class topology:
@@ -82,20 +83,72 @@ class topology:
 
         return res
 
-        # end = len(self.sw_conns)
-        # i = 0
-        # while i < end:
-        #     self.sw_conns.append(
-        #         (self.sw_conns[i][1], self.sw_conns[i][0], bandwidth))
-        #     i += 1
+    @classmethod
+    def jellyfish(cls, nodes, connectivity, seed):
+        # validate
+        if nodes <= connectivity:
+            raise Exception("nodes<=connectivity")
+        if nodes < 2:
+            raise Exception("nodes<2")
+
+        # init vars
+        res = cls()
+        rng = random.Random(seed)
+        connections = {i: []for i in range(connectivity+1)}
+        connections[0] = [i for i in range(0, nodes)]
+
+        for i in range(nodes):
+            h = 'h{}'.format(i+1)
+            s = 's{}'.format(i+1)
+            res.endpoints.append((h, s))
+
+        # connect first node
+        host_a = 0
+        host_b = rng.randint(1, nodes)
+        res.sw_conns.append((
+            res.endpoints[host_a][1], res.endpoints[host_b][1]))
+        connections[0].remove(host_a)
+        connections[0].remove(host_b)
+        connections[1].append(host_a)
+        connections[1].append(host_b)
+
+        # connect other nodes
+        while True:
+            host_a = None
+            host_b = None
+            # select one node, prefer already connected
+            for i in range(1, connectivity):
+                if len(connections[i]) > 0:
+                    host_a = connections[i][rng.randint(
+                        0, len(connections[i])-1)]
+                    connections[i].remove(host_a)
+                    connections[i+1].append(host_a)
+                    break
+
+            for i in range(connectivity):
+                if len(connections[i]) > 0:
+                    while True:
+                        host_b = connections[i][rng.randint(
+                            0, len(connections[i])-1)]
+                        if host_b != host_a:
+                            connections[i].remove(host_b)
+                            connections[i+1].append(host_b)
+                            break
+                    break
+
+            res.sw_conns.append((
+                res.endpoints[host_a][1], res.endpoints[host_b][1]))
+
+            if len(connections[connectivity]) == nodes:
+                break
+
+        return res
 
 
 if __name__ == "__main__":
-    topo = topology.crystal()
-    print(topo.endpoints)
+    topo = topology.jellyfish(16, 3, 2012)
+    # print(topo.endpoints)
     print(topo.sw_conns)
 
     # topo = topology.from_csv(
     #     "/home/mininet/project/data/scenario/topology.csv")
-    # print(topo.endpoints)
-    # print(topo.sw_conns)

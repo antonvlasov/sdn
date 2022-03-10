@@ -2,11 +2,13 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"net/http/httptrace"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -31,7 +33,7 @@ func ginError(ctx *gin.Context, code int, err error) {
 	ctx.AbortWithStatusJSON(code, gin.H{"error": err.Error()})
 }
 
-func (r *Client) request(method, url string, body io.Reader) (resp *http.Response, fb time.Time, err error) {
+func request(c *http.Client, method, url string, body io.Reader) (resp *http.Response, err error) {
 	var req *http.Request
 
 	req, err = http.NewRequest(method, url, body)
@@ -39,14 +41,7 @@ func (r *Client) request(method, url string, body io.Reader) (resp *http.Respons
 		return
 	}
 
-	trace := &httptrace.ClientTrace{
-		GotFirstResponseByte: func() {
-			fb = time.Now()
-		},
-	}
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-
-	resp, err = r.c.Do(req)
+	resp, err = c.Do(req)
 
 	return
 }
@@ -56,7 +51,7 @@ func discardBody(resp *http.Response) {
 	resp.Body.Close()
 }
 
-func mustReadAll(r io.ReadCloser) []byte {
+func mustReadAll(r io.Reader) []byte {
 	b, err := ioutil.ReadAll(r)
 	if err != nil {
 		log.Fatal(err)
@@ -65,7 +60,7 @@ func mustReadAll(r io.ReadCloser) []byte {
 	return b
 }
 
-func immitateRead(r io.ReadCloser) int {
+func immitateRead(r io.Reader) int {
 	total := 0
 
 	for n, err := r.Read(dump); n != 0 || err != io.EOF; n, err = r.Read(dump) {
@@ -76,4 +71,39 @@ func immitateRead(r io.ReadCloser) int {
 	}
 
 	return total
+}
+
+func (r Tasks) Less(i, j int) bool {
+	return r[i].TimeOffsetSeconds < r[j].TimeOffsetSeconds
+}
+
+func (r Tasks) Swap(i, j int) {
+	r[i], r[j] = r[j], r[i]
+}
+
+func (r Tasks) Len() int {
+	return len(r)
+}
+
+// Tasks must be sorted by time
+func PrepareScenario(path string, speed float64) ([]Task, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var res Tasks
+	if err = json.Unmarshal(b, &res); err != nil {
+		return nil, err
+	}
+
+	zero := time.Now()
+	for i := range res {
+		res[i].Start = zero.Add(time.Duration(res[i].TimeOffsetSeconds * speed * float64(time.Second)))
+	}
+
+	return res, nil
 }

@@ -4,19 +4,23 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"host-service/pkg/redis"
-	"host-service/pkg/service"
 	"log"
 	"net"
+	"os"
+
+	"host-service/pkg/service"
+
+	semaphore "github.com/dangerousHobo/go-semaphore"
 )
 
 type Settings struct {
 	ScenarioPath          string // tasks must be sorted by time.
 	Speed                 float64
-	ControlPort           int
 	ServeStartingOnPort   int
 	RequestStartingOnPort int
 	ServiceName           string
+	SemaphoreName         string
+	TestName              string
 }
 
 func getMyIP() (string, error) {
@@ -33,7 +37,7 @@ func getMyIP() (string, error) {
 		// check the address type and if it is not a loopback the display it
 		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
 			if ipnet.IP.To4() != nil {
-				return ipnet.String(), nil
+				return ipnet.IP.String(), nil
 			}
 		}
 	}
@@ -50,11 +54,17 @@ func parseArgs() *Settings {
 
 	flag.StringVar(&settings.ScenarioPath, "scenario", "", "path to scenario file")
 	flag.Float64Var(&settings.Speed, "speed", 1, "speed")
-	flag.IntVar(&settings.ControlPort, "control-port", 7000, "control port")
 	flag.IntVar(&settings.ServeStartingOnPort, "serve-first-port", 7100, fmt.Sprintf("first port to serve on. total %v consecutive ports will be used", len(service.PortOffsets)))
 	flag.IntVar(&settings.RequestStartingOnPort, "request-first-port", 7100, fmt.Sprintf("first port to send requests to. total %v consecutive ports will be used", len(service.PortOffsets)))
 	flag.StringVar(&settings.ServiceName, "service-name", addr, "service name for logging")
+	flag.StringVar(&settings.SemaphoreName, "sem-name",
+		"", "semaphore name for sync")
+	flag.StringVar(&settings.TestName, "test-name", "", "global test name for logging")
 	flag.Parse()
+
+	if settings.SemaphoreName == "" {
+		log.Fatal("semaphore name must not be empty")
+	}
 
 	return &settings
 }
@@ -64,10 +74,30 @@ func main() {
 
 	settings := parseArgs()
 
+	f, err := os.OpenFile("/home/mininet/project/data/logs/diag-"+settings.ServiceName, os.O_WRONLY|os.O_CREATE, 0o755)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.SetOutput(f)
+
+	defer f.Close()
+
+	log.Printf("test name is %v\n", settings.TestName)
+
+	var sem semaphore.Semaphore
+	// default for testing two nodes without mininet
+	if err := sem.Open(settings.SemaphoreName, 0o777, 2); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("opened semaphore %v\n", settings.SemaphoreName)
+
 	// start services
 
 	server := service.NewServer(settings.ServeStartingOnPort)
 	server.Start()
+
+	log.Println("started server")
 
 	var client *service.Client
 	if settings.ScenarioPath != "" {
@@ -77,19 +107,29 @@ func main() {
 		}
 
 		if tasks != nil {
-			client := service.NewClient(tasks, settings.ServiceName, settings.RequestStartingOnPort)
-			client.Start()
+			client := service.NewClient(&sem, tasks, settings.ServiceName, settings.RequestStartingOnPort, settings.TestName)
+			// block
+			client.Run()
+
+			fmt.Println("client done")
 		}
 	}
 
-	wg := &redis.WaitGroup{}
+	// decrement and close semaphore
 
-	wg.Add(1)
-	defer wg.Done()
+	if err := sem.Wait(); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := sem.Close(); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("decremented and closed semaphore")
 
 	// stop on signal
 
-	WaitForStopSignal(settings.ControlPort)
+	WaitForStopSignal()
 	if client != nil {
 		client.Stop()
 	}

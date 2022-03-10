@@ -3,9 +3,11 @@ module host-service
 go 1.17
 
 require (
+	github.com/dangerousHobo/go-semaphore v0.0.0-20180910140543-7a1f550dbcb8
 	github.com/gin-gonic/gin v1.7.2
 	github.com/go-redis/redis v6.15.9+incompatible
 	github.com/google/uuid v1.3.0
+	github.com/mattn/go-sqlite3 v1.14.11
 )
 
 require (
