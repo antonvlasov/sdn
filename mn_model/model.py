@@ -86,6 +86,9 @@ def init_topo(cfg: Dict[str, Any]):
     if cfg['kind'] == 'jellyfish':
         return topology.jellyfish(int(cfg['nodes']), int(cfg['connectivity']), int(cfg['seed']))
 
+    if cfg['kind'] == 'simplest':
+        return topology.simplest_of_topologies()
+
     raise Exception('unexpected topo kind')
 
 
@@ -105,7 +108,7 @@ def main():
             bandwidth = cfg.get('bandwidth')
             services_setting = retrieve_services_settings(cfg)
             manual = cfg.setdefault('manual', False)
-            launch_controller = cfg.setdefault('launch-controller', 'False')
+            launch_controller = cfg.setdefault('launch-controller', False)
 
         except yaml.YAMLError as exc:
             print(exc)

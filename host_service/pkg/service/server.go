@@ -17,9 +17,7 @@ import (
 )
 
 const (
-	filePath  = "/home/mininet/project/data/server_data/files/"
-	webPath   = "/home/mininet/project/data/server_data/web/"
-	videoPath = "/home/mininet/project/data/server_data/videos/"
+	filePath = "/home/mininet/project/data/server_data/files/"
 )
 
 var fileDescriptors = make(map[string]*os.File)
@@ -34,9 +32,9 @@ func NewServer(firstPort int) *server {
 	webServer := gin.Default()
 	videoServer := gin.Default()
 
-	fileServer.GET("/file/:name", serveFile)
-	webServer.GET("/web/:name", serveWeb)
-	videoServer.GET("/video/:name", serveVideo)
+	fileServer.GET("/file/:name", serveContent)
+	webServer.GET("/web/:name", serveContent)
+	videoServer.GET("/video/:name", serveContent)
 
 	srv := server{
 		servers: map[string]*http.Server{
@@ -99,32 +97,11 @@ func validateFileName(name string) error {
 	return nil
 }
 
-func serveFile(ctx *gin.Context) {
-	name := ctx.Param("name")
-	if err := validateFileName(name); err != nil {
-		ginError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	ctx.File(filePath + name)
-}
-
-func serveWeb(ctx *gin.Context) {
-	name := ctx.Param("name")
-	if err := validateFileName(name); err != nil {
-		ginError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	ctx.File(webPath + name)
-}
-
-func serveVideo(ctx *gin.Context) {
+func serveContent(ctx *gin.Context) {
 	var (
-		req  VideoRequest
-		resp VideoResponse
-		f    *os.File
-		err  error
+		req VideoRequest
+		f   *os.File
+		err error
 	)
 
 	if err = ctx.BindJSON(&req); err != nil {
@@ -144,19 +121,17 @@ func serveVideo(ctx *gin.Context) {
 	}
 
 	if f == nil {
-		f, err = os.Open(videoPath + req.Name)
+		f, err = os.Open(filePath + req.Name)
 		if err != nil {
 			ginError(ctx, http.StatusBadRequest, err)
 			return
 		}
 
-		resp.ID = uuid.NewString()
-		fileDescriptors[resp.ID] = f
-	} else {
-		resp.ID = req.ID
+		req.ID = uuid.NewString()
+		fileDescriptors[req.ID] = f
 	}
 
-	log.Println("got descriptor")
+	ctx.Header(headerID, req.ID)
 
 	if _, err = f.Seek(req.Offset, 0); err != nil {
 		ginError(ctx, http.StatusBadRequest, err)
@@ -178,21 +153,17 @@ func serveVideo(ctx *gin.Context) {
 	if n < int(req.Length) || err == io.EOF {
 		log.Println("got to the end of file")
 
-		if err = fileDescriptors[resp.ID].Close(); err != nil {
+		if err = fileDescriptors[req.ID].Close(); err != nil {
 			ginError(ctx, http.StatusInternalServerError, err)
 			return
 		}
 
-		delete(fileDescriptors, resp.ID)
+		delete(fileDescriptors, req.ID)
 	}
 
 	log.Println(n)
 
-	resp.Bytes = b[:n]
-
-	log.Println("writing response...")
-
-	ctx.JSON(http.StatusOK, resp)
+	ctx.Data(http.StatusOK, "application/octet-stream", b[:n])
 
 	log.Println("wrote response")
 }

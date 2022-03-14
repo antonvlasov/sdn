@@ -1,4 +1,5 @@
 from tkinter.constants import S
+from turtle import distance
 from unittest.mock import DEFAULT
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -38,8 +39,8 @@ import importlib.util
 random.seed()
 
 UINT64_MAX = 18446744073709551616
-FLOW_COST = 1
-DEFAULT_BANDWIDTH = 10
+FLOW_COST = 200
+DEFAULT_BANDWIDTH = 1
 
 GET_BANDWIDTH = None
 
@@ -90,11 +91,6 @@ with open("/home/mininet/project/data/cfg/controller.yaml", "r") as f:
         raise exc
 
 
-class NodeType(Enum):
-    OF_SWITCH = 1
-    HOST = 2
-
-
 @dataclass
 class SimplePort:
     dpid: int
@@ -113,7 +109,6 @@ class SimpleHost:
 
 @dataclass
 class Node:
-    node_type: NodeType
     datapath: Optional[Datapath]
     neighbours: Dict[int, 'Node'] = field(default_factory=dict)  # port to node
     ports: Dict[int, SimplePort] = field(default_factory=dict)
@@ -206,7 +201,6 @@ class NetGraph:
     _node_graph: Dict[int, Node]
     _hosts: Dict[str, SimpleHost]
     _broadcast_targets: Set[Tuple[Datapath, int]]  # datapath and port_no
-    _routes: Dict[int, Dict[int, List[SimplePort]]]
 
     def __init__(self, logger) -> None:
         self.logger = logger
@@ -242,7 +236,7 @@ class NetGraph:
             self.mutex.acquire()
             for l in links:
                 self._node_graph[l.src.dpid].neighbours[l.src.port_no] = self._node_graph[l.dst.dpid]
-                self._node_graph[l.src.dpid].ports[l.src.port_no].max_load += GET_BANDWIDTH(
+                self._node_graph[l.src.dpid].ports[l.src.port_no].max_load = GET_BANDWIDTH(
                     l.src.dpid, l.dst.dpid)
         finally:
             self.mutex.release()
@@ -251,7 +245,7 @@ class NetGraph:
         try:
             self.mutex.acquire()
             for sw in switches:
-                node = Node(node_type=NodeType.OF_SWITCH, datapath=sw.dp,
+                node = Node(datapath=sw.dp,
                             neighbours={}, ports={port.port_no: SimplePort(port.dpid, port.port_no, port.hw_addr) for port in sw.ports})
 
                 existing = self._node_graph.get(sw.dp.id)
@@ -296,14 +290,11 @@ class NetGraph:
             return None
         src_dpid = src_host.port.dpid
         dst_dpid = dst_host.port.dpid
-        known = self._routes.setdefault(src_dpid, {}).get(dst_dpid)
-        if known is not None:
-            return known
 
         route: List[SimplePort] = None
         try:
             self.mutex.acquire()
-            route = self.bfs(src_dpid, dst_dpid, load)
+            route = self.deikstra(src_dpid, dst_dpid, load)
         finally:
             self.mutex.release()
         if route is None:
@@ -312,9 +303,11 @@ class NetGraph:
 
         # add path from last switch to dst host
         route.insert(0, dst_host.port)
+        print(f'rt from {src_dpid} to {dst_dpid}: \n{route}')
+
         for port in route:
             port.load += load
-        self._routes[src_dpid][dst_dpid] = route
+
         return route
 
     def defer_load_decrement(self, route: List[SimplePort], delay_seconds: float, load: int = FLOW_COST):
@@ -329,6 +322,32 @@ class NetGraph:
         finally:
             self.mutex.release()
 
+    def deikstra(self, src_dpid: int, dst_dpid: int, load: float = 0) -> List[SimplePort]:
+        distances: Dict[int, int] = {
+            node: UINT64_MAX for node in self._node_graph.keys()}
+        visited: Set[int] = set()
+        prevs: Dict[int, SimplePort] = {}
+
+        distances[src_dpid] = 0
+
+        for _ in distances:
+            cur = min({node: d for node, d in distances.items() if node not in visited},
+                      key=distances.get)
+            visited.add(cur)
+            for port_no, node in self._node_graph[cur].neighbours.items():
+                if distances[cur] + self._node_graph[cur].ports[port_no].load < distances[node.datapath.id]:
+                    distances[node.datapath.id] = distances[cur] + \
+                        self._node_graph[cur].ports[port_no].load
+                    prevs[node.datapath.id] = self._node_graph[cur].ports[port_no]
+
+        path = []
+        cur = dst_dpid
+        while prevs.get(cur) is not None:
+            path.append(prevs[cur])
+            cur = prevs[cur].dpid
+
+        return path
+
     def bfs(self, src_dpid: int, dst_dpid: int, load: float = 0) -> List[SimplePort]:
         visited: List[int] = []  # List to keep track of visited nodes.
         queue: List[int] = [src_dpid]  # Initialize a queue
@@ -339,8 +358,7 @@ class NetGraph:
             visited.append(cur)
 
             for port_no, node in self._node_graph[cur].neighbours.items():
-                if NodeType(node.node_type) == NodeType.OF_SWITCH \
-                        and node.datapath.id not in visited \
+                if node.datapath.id not in visited \
                         and self._node_graph[cur].ports[port_no].load+load < self._node_graph[cur].ports[port_no].max_load:
                     queue.append(node.datapath.id)
                     prevs[node.datapath.id] = self._node_graph[cur].ports[port_no]
@@ -563,7 +581,7 @@ class MULTIPATH_13(app_manager.RyuApp):
             dp = self.net_graph.get_node(path_node.dpid).datapath
             self.add_flow(dp, self.HARD_TIMEOUT, 1, match, actions, cookie)
         # wait for flows to apply
-        hub.sleep(0.05)
+        hub.sleep(0)
 
         # current switch out port
         out_port = path[-1].port_no

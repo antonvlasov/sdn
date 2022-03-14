@@ -144,6 +144,15 @@ class topology:
 
         return res
 
+    @classmethod
+    def simplest_of_topologies(cls):
+        res = cls()
+
+        res.endpoints = [('h1', 's1'), ('h2', 's2')]
+        res.sw_conns = [(res.endpoints[0][1], res.endpoints[1][1])]
+
+        return res
+
 
 if __name__ == "__main__":
     topo = topology.jellyfish(16, 3, 2012)

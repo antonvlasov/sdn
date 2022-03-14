@@ -78,6 +78,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := f.Truncate(0); err != nil {
+		log.Fatal(err)
+	}
+
 	log.SetOutput(f)
 
 	defer f.Close()

@@ -14,8 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var dump = make([]byte, 1024)
-
 func waitUntil(ctx context.Context, until time.Time) {
 	timer := time.NewTimer(time.Until(until))
 	defer timer.Stop()
@@ -41,9 +39,7 @@ func request(c *http.Client, method, url string, body io.Reader) (resp *http.Res
 		return
 	}
 
-	resp, err = c.Do(req)
-
-	return
+	return c.Do(req)
 }
 
 func discardBody(resp *http.Response) {
@@ -60,17 +56,8 @@ func mustReadAll(r io.Reader) []byte {
 	return b
 }
 
-func immitateRead(r io.Reader) int {
-	total := 0
-
-	for n, err := r.Read(dump); n != 0 || err != io.EOF; n, err = r.Read(dump) {
-		if err != nil && err != io.EOF {
-			log.Fatal(err)
-		}
-		total += n
-	}
-
-	return total
+func immitateRead(r io.Reader) (int64, error) {
+	return io.Copy(ioutil.Discard, r)
 }
 
 func (r Tasks) Less(i, j int) bool {

@@ -1,6 +1,7 @@
 import posix_ipc
 
-SEMAPHORE_NAME = '/mininet_host_clients'
+SEM_NAMES = ['/mininet_host_clients', '/two_nodes']
 
-sem = posix_ipc.Semaphore(SEMAPHORE_NAME, flags=posix_ipc.O_CREAT)
-sem.unlink()
+for sn in SEM_NAMES:
+    sem = posix_ipc.Semaphore(sn, flags=posix_ipc.O_CREAT)
+    sem.unlink()

@@ -11,8 +11,13 @@ const (
 )
 
 const (
-	videoBytesPerSecond = 302000
-	videoFrameSeconds   = 10.0
+	headerID = "ID"
+)
+
+const (
+	speed   = 200 * 1024 * 1024 / 8
+	timeout = 5.0
+	retries = 5
 )
 
 var PortOffsets = map[string]int{
@@ -29,7 +34,6 @@ type Task struct {
 	Server            string
 	Kind              string
 	Path              string
-	Speedup           float64
 }
 
 type VideoRequest struct {
@@ -37,9 +41,4 @@ type VideoRequest struct {
 	ID     string `json:"id"`
 	Offset int64  `json:"offset"`
 	Length int64  `json:"length"`
-}
-
-type VideoResponse struct {
-	ID    string `json:"id"`
-	Bytes []byte `json:"bytes"`
 }

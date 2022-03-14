@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"sync"
@@ -37,7 +36,7 @@ func NewClient(sem *semaphore.Semaphore, tasks Tasks, name string, serverFirstPo
 		name:            name,
 		testName:        testName,
 		fileClient:      &http.Client{},
-		videoClient:     &http.Client{Timeout: time.Duration(videoFrameSeconds * float64(time.Second))},
+		videoClient:     &http.Client{Timeout: time.Duration(timeout * float64(time.Second))},
 		ctx:             ctx,
 		cancel:          cancel,
 		wg:              &sync.WaitGroup{},
@@ -75,12 +74,8 @@ func (r *Client) executeTask(t *Task) {
 	var err error
 
 	switch t.Kind {
-	case KindFile:
-		err = r.fileRequest(t)
-	case KindVideo:
-		err = r.videoRequest(t)
-	case KindWeb:
-		err = r.fileRequest(t)
+	case KindFile, KindWeb, KindVideo:
+		err = r.requestContent(t)
 	default:
 		panic("unknown kind")
 	}
@@ -92,43 +87,20 @@ func (r *Client) executeTask(t *Task) {
 	}
 }
 
-func (r *Client) fileRequest(t *Task) error {
-	task := logging.NewTask(r.testName, t.Server, r.name, t.Kind, 1)
-
-	resp, err := request(r.fileClient, "GET", fmt.Sprintf("http://%v:%v/%v/%v", t.Server, r.serverFirstPort+PortOffsets[t.Kind], t.Kind, t.Path), nil)
-	if err != nil {
-		return err
-	}
-
-	defer discardBody(resp)
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%v: %s", resp.StatusCode, mustReadAll(resp.Body))
-	}
-
-	task.Bytes = immitateRead(resp.Body)
-
-	end := logging.GetFormatedTime()
-
-	task.FirstResponseTimestamp = end
-	task.LastResponseTimestamp = end
-	task.ReceivedResponses = 1
-
-	return logging.InsertTask(&task)
-}
-
-func (r *Client) videoRequest(t *Task) error {
+func (r *Client) requestContent(t *Task) error {
 	task := logging.NewTask(r.testName, t.Server, r.name, t.Kind, 0)
 	req := VideoRequest{
 		Name:   t.Path,
-		Length: videoBytesPerSecond * videoFrameSeconds,
+		Length: speed,
 	}
+
+	var length int64
 
 	if err := logging.InsertTask(&task); err != nil {
 		return err
 	}
 
-	tick := time.NewTicker(time.Duration(videoFrameSeconds / t.Speedup * float64(time.Second)))
+	tick := time.NewTicker(time.Second)
 
 	for {
 		<-tick.C
@@ -140,54 +112,49 @@ func (r *Client) videoRequest(t *Task) error {
 			return err
 		}
 
-		// log.Printf("request %v\n", req)
+		for i := 0; i < retries; i++ {
+			if i > 0 {
+				log.Println("retry ", i)
+			}
 
-		resp, err := request(r.videoClient, "GET", fmt.Sprintf("http://%v:%v/%v/%v", t.Server, r.serverFirstPort+PortOffsets[t.Kind], t.Kind, t.Path), bytes.NewReader(b))
+			resp, err := request(r.videoClient, "GET", fmt.Sprintf("http://%v:%v/%v/%v", t.Server, r.serverFirstPort+PortOffsets[t.Kind], t.Kind, t.Path), bytes.NewReader(b))
+			if err != nil {
+				log.Println(err)
+				continue
+			}
 
-		log.Println("got video response")
+			if resp.StatusCode != http.StatusOK {
+				log.Println("bad status code")
+				discardBody(resp)
+				return fmt.Errorf("%v: %s", resp.StatusCode, mustReadAll(resp.Body))
+			}
+
+			task.LastResponseTimestamp = logging.GetFormatedTime()
+
+			log.Println("got time")
+
+			length, err = immitateRead(resp.Body)
+			if err != nil {
+				discardBody(resp)
+				log.Println(err)
+				continue
+			}
+
+			req.ID = resp.Header.Get(headerID)
+
+			discardBody(resp)
+			break
+		}
 
 		req.Offset += req.Length
 
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-
-		log.Println("no error")
-
-		defer discardBody(resp)
-
-		if resp.StatusCode != http.StatusOK {
-			log.Println("bad status code")
-			return fmt.Errorf("%v: %s", resp.StatusCode, mustReadAll(resp.Body))
-		}
-
-		rt := logging.GetFormatedTime()
-
-		log.Println("got time")
-
-		b, err = ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
-
 		log.Println("read body")
 
-		var vr VideoResponse
-		if err := json.Unmarshal(b, &vr); err != nil {
-			return err
-		}
-
-		log.Println("unmarshalled")
-
-		task.Bytes += len(vr.Bytes)
+		task.Bytes += int(length)
 		task.ReceivedResponses += 1
 		if task.FirstResponseTimestamp == "" {
-			task.FirstResponseTimestamp = rt
+			task.FirstResponseTimestamp = task.LastResponseTimestamp
 		}
-		task.LastResponseTimestamp = rt
-
-		req.ID = vr.ID
 
 		log.Println(task)
 
@@ -195,7 +162,7 @@ func (r *Client) videoRequest(t *Task) error {
 			return err
 		}
 
-		if len(vr.Bytes) < int(req.Length) {
+		if length < req.Length {
 			log.Println("broke after received less bytes")
 			break
 		}
