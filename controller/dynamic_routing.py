@@ -34,52 +34,26 @@ import importlib.util
 random.seed()
 
 UINT64_MAX = 18446744073709551616
-FLOW_COST = 200
-DEFAULT_BANDWIDTH = 1
+FLOW_COST = None
+IDLE_TIMEOUT = 10
 
 GET_BANDWIDTH = None
 
 
-def init_bandwidths(cfg: Dict[str, Any]) -> Callable[[int, int], int]:
-    if cfg['bandwidth'].get('csv') is not None:
-        spec = importlib.util.spec_from_file_location(
-            "net_topo.topo", "/home/mininet/project/net_topo/topo.py")
-        topo = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(topo)
+def init_bandwidths(cfg: Dict[str, Any]) -> Tuple[int, Callable[[int, int], int]]:
+    bw = cfg['bandwidth']
+    _FLOW_COST = cfg['flow-bw']/2
 
-        def init_bandwidths(topo: topo.topology) -> Dict[int, Dict[int, int]]:
-            result = {}
-            for edge in topo.sw_conns:
-                s1, s2, bw = int(edge[0][1:]), int(
-                    edge[1][1:]), int(edge[2])
-                result.setdefault(s1, {})
-                result.setdefault(s2, {})
-                result[s1][s2] = bw
-                result[s2][s1] = bw
-            return result
+    def _GET_BANDWIDTH(src: int, dst: int) -> int:
+        return bw
 
-        _BANDWIDTHS = init_bandwidths(
-            topo.topology.from_csv(cfg['bandwidth']['csv']))
-
-        def _GET_BANDWIDTH(src: int, dst: int) -> int:
-            return _BANDWIDTHS[src][dst]
-
-        return _GET_BANDWIDTH
-    else:
-        bw = DEFAULT_BANDWIDTH
-        if cfg['bandwidth'].get('const') is not None:
-            bw = cfg['bandwidth']['const']
-
-        def _GET_BANDWIDTH(src: int, dst: int) -> int:
-            return bw
-
-        return _GET_BANDWIDTH
+    return _FLOW_COST,  _GET_BANDWIDTH
 
 
-with open("/home/mininet/project/data/cfg/controller.yaml", "r") as f:
+with open("/home/mininet/project/data/cfg/topo.yaml", "r") as f:
     try:
         cfg: Dict[str, Any] = yaml.safe_load(f)
-        GET_BANDWIDTH = init_bandwidths(cfg)
+        FLOW_COST, GET_BANDWIDTH = init_bandwidths(cfg)
 
     except yaml.YAMLError as exc:
         print(exc)
@@ -354,7 +328,8 @@ class NetGraph:
     def adjust_cost(self, route: List[SimplePort], diff):
         try:
             self._mutex.w_lock()
-            # TODO: adjust cost
+            for port in route:
+                self._node_graph[port.dpid].ports[port.port_no].load += diff
         finally:
             self._mutex.w_unlock()
 
@@ -387,7 +362,6 @@ def OFPMatch_from_SimpleMatch(match: SimpleMatch) -> OFPMatch:
                        tcp_dst=match.tcp_dst,
                        eth_type=match.eth_type,
                        ip_proto=6)
-        print(match.tcp_src, match.tcp_dst)
     elif match.kind == 'udp':
         res = OFPMatch(eth_src=match.eth_src,
                        eth_dst=match.eth_dst,
@@ -403,30 +377,46 @@ def OFPMatch_from_SimpleMatch(match: SimpleMatch) -> OFPMatch:
     return res
 
 
+establish_route_func = Callable[[OFPMatch, List[SimplePort], int, int], None]
+
+
 class RoutingManager:
-    _routes: Set[SimpleHost]
+    _routes: Dict[int, Tuple[SimpleMatch, List[SimplePort]]]
+    _matches: Set[SimpleMatch]
     _mu: hub.BoundedSemaphore
     _net_graph: NetGraph
 
     def __init__(self, net_graph):
         self._mu = hub.BoundedSemaphore()
-        self._routes = set()
+        self._routes = {}
+        self._matches = set()
         self._net_graph = net_graph
 
-    def _establish_route(self, match: SimpleMatch, establish_route: Callable[[OFPMatch, List[SimplePort], int], None]) -> Boolean:
-        if match not in self._routes:
+    def _establish_route(self, match: SimpleMatch, establish_route: establish_route_func) -> Boolean:
+        if match not in self._matches:
             route = self._net_graph.get_route(match.eth_src, match.eth_dst)
             if route is None:
                 return False
-            print("found route")
+
             priority = 10 if match.kind == '' else 1
-            establish_route(OFPMatch_from_SimpleMatch(match), route, priority)
-            print("established route")
-            self._routes.add(match)
+            cookie = randint(0, UINT64_MAX)
+
+            establish_route(OFPMatch_from_SimpleMatch(
+                match), route, priority, cookie)
+
+            self._net_graph.adjust_cost(route, FLOW_COST)
+
+            self._routes[cookie] = (match, route)
+            self._matches.add(match)
+
+            t = time.localtime()
+            t = time.strftime("%H:%M:%S", t)
+            print(
+                f"{t}: established route from {match.eth_src} port {match.tcp_src} to {match.eth_dst} port {match.tcp_dst}")
 
         return True
 
-    def handle_route_request(self, forward_match: SimpleMatch, backward_match: SimpleMatch, establish_route: Callable[[OFPMatch, List[SimplePort], int], None]) -> Boolean:
+    def handle_route_request(self, forward_match: SimpleMatch, backward_match: SimpleMatch, establish_route: establish_route_func) -> Boolean:
         try:
             self._mu.acquire()
             if not self._establish_route(forward_match, establish_route):
@@ -438,12 +428,19 @@ class RoutingManager:
         finally:
             self._mu.release()
 
-    def delete_route(self, forward_match: SimpleMatch, backward_match: SimpleMatch):
+    def delete_route(self, cookie: int):
         try:
             self._mu.acquire()
-            self._routes.remove(forward_match)
-            self._routes.remove(backward_match)
+            if cookie in self._routes.keys():
+                match, route = self._routes[cookie]
+                self._net_graph.adjust_cost(route, -FLOW_COST)
+                del self._routes[cookie]
+                self._matches.remove(match)
 
+                t = time.localtime()
+                t = time.strftime("%H:%M:%S", t)
+                print(
+                    f"{t}: deleted route from {match.eth_src} port {match.tcp_src} to {match.eth_dst} port {match.tcp_dst}")
         finally:
             self._mu.release()
 
@@ -478,18 +475,45 @@ class MULTIPATH_13(app_manager.RyuApp):
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                           ofproto.OFPCML_NO_BUFFER)]
-        self.add_flow(datapath, 0, match, actions)
+        self.add_flow(datapath, 0, match, actions, 0, 0)
+
+        # ask to notify controller on every event
+        self.send_set_async(datapath)
+
         self.logger.info("switch:%s connected", dpid)
 
-    def add_flow(self, datapath, priority, match, actions):
-        ofproto = datapath.ofproto
+    def send_set_async(self, datapath):
+        ofp = datapath.ofproto
+        ofp_parser = datapath.ofproto_parser
+
+        packet_in_mask = 1 << ofp.OFPR_NO_MATCH | 1 << ofp.OFPR_ACTION
+        port_status_mask = (1 << ofp.OFPPR_ADD
+                            | 1 << ofp.OFPPR_DELETE
+                            | 1 << ofp.OFPPR_MODIFY)
+        flow_removed_mask = (1 << ofp.OFPRR_IDLE_TIMEOUT
+                             | 1 << ofp.OFPRR_HARD_TIMEOUT
+                             | 1 << ofp.OFPRR_DELETE
+                             | ofp.OFPRR_GROUP_DELETE)
+        req = ofp_parser.OFPSetAsync(datapath,
+                                     [packet_in_mask, packet_in_mask],
+                                     [port_status_mask, port_status_mask],
+                                     [flow_removed_mask, flow_removed_mask])
+        datapath.send_msg(req)
+
+    def add_flow(self, datapath, priority, match, actions, idle_timeout: int, cookie: int):
+        ofp = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+        inst = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS,
                                              actions)]
 
-        mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
-                                match=match, instructions=inst)
+        mod = parser.OFPFlowMod(datapath=datapath,
+                                priority=priority,
+                                match=match,
+                                instructions=inst,
+                                idle_timeout=idle_timeout,
+                                flags=ofp.OFPFF_SEND_FLOW_REM,
+                                cookie=cookie)
         datapath.send_msg(mod)
 
     def _build_packet_out(self, datapath, buffer_id, src_port, dst_port, data):
@@ -606,10 +630,7 @@ class MULTIPATH_13(app_manager.RyuApp):
             self._handle_arp_reply(arp_pkt)
             return
 
-    def _establish_route(self, parser, match, route: List[SimplePort], priority: int):
-        # adjust cost
-        self._net_graph.adjust_cost(route, FLOW_COST)
-
+    def _establish_route(self, parser, match, route: List[SimplePort], priority: int, cookie: int):
         # send flows to controller
         for path_node in route:
             cp_match = copy.copy(match)
@@ -618,9 +639,8 @@ class MULTIPATH_13(app_manager.RyuApp):
 
             # TODO: add idle timeout and notify controller on flow removal to substract cost from internal graph
 
-            self.add_flow(dp, priority, cp_match, actions)
-
-        hub.sleep(0)
+            self.add_flow(dp, priority, cp_match,
+                          actions, IDLE_TIMEOUT, cookie)
 
     def _create_matches(self, pkt: packet.Packet) -> Tuple[SimpleMatch, SimpleMatch, OFPMatch, OFPMatch]:
         eth: ethernet.ethernet = pkt.get_protocol(ethernet.ethernet)
@@ -656,8 +676,8 @@ class MULTIPATH_13(app_manager.RyuApp):
         if matches is None:
             return
 
-        def er(match: OFPMatch, route: List[SimplePort], priority: int):
-            self._establish_route(parser, match, route, priority)
+        def er(match: OFPMatch, route: List[SimplePort], priority: int, cookie: int):
+            self._establish_route(parser, match, route, priority, cookie)
 
         if not self._routing_manager.handle_route_request(matches[0], matches[1], er):
             # try one more time because graph could have been not updated
@@ -700,6 +720,17 @@ class MULTIPATH_13(app_manager.RyuApp):
             latency_probe_pkt = pkt.get_protocol(LatencyProbePacket)
             if isinstance(latency_probe_pkt, LatencyProbePacket):
                 print(pkt)
+
+    @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
+    def _flow_removed_handler(self, ev):
+        msg = ev.msg
+        dp = msg.datapath
+        ofp = dp.ofproto
+
+        if msg.reason == ofp.OFPRR_IDLE_TIMEOUT:
+            self._routing_manager.delete_route(msg.cookie)
+        else:
+            self.logger.info(f"unexpected route remove reason: {msg.reason}")
 
     def query_switches(self) -> None:
         def request_stats(node: Node) -> None:

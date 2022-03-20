@@ -15,12 +15,12 @@ import (
 
 type Settings struct {
 	ScenarioPath          string // tasks must be sorted by time.
-	Speed                 float64
 	ServeStartingOnPort   int
 	RequestStartingOnPort int
 	ServiceName           string
 	SemaphoreName         string
 	TestName              string
+	FlowBandwidth         int64
 }
 
 func getMyIP() (string, error) {
@@ -53,13 +53,13 @@ func parseArgs() *Settings {
 	}
 
 	flag.StringVar(&settings.ScenarioPath, "scenario", "", "path to scenario file")
-	flag.Float64Var(&settings.Speed, "speed", 1, "speed")
 	flag.IntVar(&settings.ServeStartingOnPort, "serve-first-port", 7100, fmt.Sprintf("first port to serve on. total %v consecutive ports will be used", len(service.PortOffsets)))
 	flag.IntVar(&settings.RequestStartingOnPort, "request-first-port", 7100, fmt.Sprintf("first port to send requests to. total %v consecutive ports will be used", len(service.PortOffsets)))
 	flag.StringVar(&settings.ServiceName, "service-name", addr, "service name for logging")
 	flag.StringVar(&settings.SemaphoreName, "sem-name",
 		"", "semaphore name for sync")
 	flag.StringVar(&settings.TestName, "test-name", "", "global test name for logging")
+	flag.Int64Var(&settings.FlowBandwidth, "flow-bw", 0, "max request speed")
 	flag.Parse()
 
 	if settings.SemaphoreName == "" {
@@ -105,13 +105,13 @@ func main() {
 
 	var client *service.Client
 	if settings.ScenarioPath != "" {
-		tasks, err := service.PrepareScenario(settings.ScenarioPath, settings.Speed)
+		tasks, err := service.PrepareScenario(settings.ScenarioPath)
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		if tasks != nil {
-			client := service.NewClient(&sem, tasks, settings.ServiceName, settings.RequestStartingOnPort, settings.TestName)
+			client := service.NewClient(&sem, tasks, settings.ServiceName, settings.RequestStartingOnPort, settings.TestName, settings.FlowBandwidth)
 			// block
 			client.Run()
 

@@ -41,15 +41,15 @@ class MyTopo(Topo):
                          switches[edge[1]], cls=TCLink, bw=bw)
 
 
-def StartServices(network, semaphore, test_name, binary, scenario_folder, speed):
+def StartServices(network, semaphore, test_name, flow_bw, binary, scenario_folder):
     print('starting services')
     for h in network.hosts:
         cmd = ' '.join(
             [binary,
              '--scenario', os.path.join(scenario_folder, h.name+'.json'),
-             '--speed', speed,
              '--sem-name', semaphore.name,
              '--test-name', test_name,
+             '--flow-bw', flow_bw,
              '&'])
 
         semaphore.release()
@@ -66,9 +66,8 @@ def retrieve_services_settings(cfg: Dict[str, Any]):
 
     binary = services['binary']
     scenario_folder = services['scenario-folder']
-    speed = str(services.setdefault('speed', 1))
 
-    return binary, scenario_folder, speed
+    return binary, scenario_folder
 
 
 def init_topo(cfg: Dict[str, Any]):
@@ -101,6 +100,7 @@ def main():
     services_setting = None
     manual = False
     launch_controller = False
+    flow_bw = None
     with open("/home/mininet/project/data/cfg/topo.yaml", "r") as f:
         try:
             cfg: Dict[str, Any] = yaml.safe_load(f)
@@ -109,6 +109,7 @@ def main():
             services_setting = retrieve_services_settings(cfg)
             manual = cfg.setdefault('manual', False)
             launch_controller = cfg.setdefault('launch-controller', False)
+            flow_bw = str(cfg['flow-bw'])
 
         except yaml.YAMLError as exc:
             print(exc)
@@ -133,36 +134,13 @@ def main():
 
     if services_setting is not None:
         sem = posix_ipc.Semaphore(SEMAPHORE_NAME, flags=posix_ipc.O_CREX)
-        StartServices(net, sem, test_name, *services_setting)
+        StartServices(net, sem, test_name, flow_bw, *services_setting)
 
         if manual:
             CLI(net)
         else:
-            # loop wait
-            h1 = None
-            h6 = None
-            for host in net.hosts:
-                if host.name == 'h6':
-                    h6 = host
-                if host.name == 'h1':
-                    h1 = host
-
-            cmd = 'echo'
-
             while True:
                 time.sleep(1)
-
-                #print("semaphore value", sem.value)
-
-                # res = h1.cmd(cmd)
-                # if res.replace(
-                #         '\r', '').replace('\n', ''):
-                #     print(res)
-                # res = h6.cmd(cmd)
-                # if res.replace(
-                #         '\r', '').replace('\n', ''):
-                #     print(res)
-
                 if sem.value == 0:
                     break
             sem.unlink()

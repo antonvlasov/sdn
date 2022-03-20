@@ -15,7 +15,6 @@ const (
 )
 
 const (
-	speed   = 200 * 1024 * 1024 / 8
 	timeout = 5.0
 	retries = 5
 )

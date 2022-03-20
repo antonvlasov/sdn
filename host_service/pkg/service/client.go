@@ -22,13 +22,14 @@ type Client struct {
 	fileClient      *http.Client
 	videoClient     *http.Client
 	serverFirstPort int
+	flowBandwidth   int64
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              *sync.WaitGroup
 	sem             *semaphore.Semaphore
 }
 
-func NewClient(sem *semaphore.Semaphore, tasks Tasks, name string, serverFirstPort int, testName string) *Client {
+func NewClient(sem *semaphore.Semaphore, tasks Tasks, name string, serverFirstPort int, testName string, flowBandwidth int64) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Client{
@@ -37,6 +38,7 @@ func NewClient(sem *semaphore.Semaphore, tasks Tasks, name string, serverFirstPo
 		testName:        testName,
 		fileClient:      &http.Client{},
 		videoClient:     &http.Client{Timeout: time.Duration(timeout * float64(time.Second))},
+		flowBandwidth:   flowBandwidth,
 		ctx:             ctx,
 		cancel:          cancel,
 		wg:              &sync.WaitGroup{},
@@ -91,7 +93,7 @@ func (r *Client) requestContent(t *Task) error {
 	task := logging.NewTask(r.testName, t.Server, r.name, t.Kind, 0)
 	req := VideoRequest{
 		Name:   t.Path,
-		Length: speed,
+		Length: r.flowBandwidth * 1024 * 1024 / 8,
 	}
 
 	var length int64

@@ -73,7 +73,7 @@ func (r Tasks) Len() int {
 }
 
 // Tasks must be sorted by time
-func PrepareScenario(path string, speed float64) ([]Task, error) {
+func PrepareScenario(path string) ([]Task, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -89,7 +89,7 @@ func PrepareScenario(path string, speed float64) ([]Task, error) {
 
 	zero := time.Now()
 	for i := range res {
-		res[i].Start = zero.Add(time.Duration(res[i].TimeOffsetSeconds * speed * float64(time.Second)))
+		res[i].Start = zero.Add(time.Duration(res[i].TimeOffsetSeconds * float64(time.Second)))
 	}
 
 	return res, nil
