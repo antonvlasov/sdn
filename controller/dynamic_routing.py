@@ -1,3 +1,4 @@
+from unicodedata import east_asian_width
 from xmlrpc.client import Boolean
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -21,6 +22,10 @@ import copy
 from ryu.topology.switches import Port, Switch, Host, Link
 from ryu.controller.controller import Datapath
 
+import requests
+from flask import Flask, request, jsonify, Response
+from waitress import serve
+
 import time
 from dataclasses import dataclass, field
 
@@ -28,8 +33,7 @@ import random
 from random import randint
 
 import struct
-
-import importlib.util
+import dill
 
 random.seed()
 
@@ -41,8 +45,8 @@ GET_BANDWIDTH = None
 
 
 def init_bandwidths(cfg: Dict[str, Any]) -> Tuple[int, Callable[[int, int], int]]:
-    bw = cfg['bandwidth']
-    _FLOW_COST = cfg['flow-bw']/2
+    bw = cfg['bandwidth']/2
+    _FLOW_COST = cfg['flow-bw']
 
     def _GET_BANDWIDTH(src: int, dst: int) -> int:
         return bw
@@ -89,6 +93,13 @@ class RWMutex:
             self._sem.release()
 
 
+class PortStates(int, Enum):
+    NEW = 0
+    IN_PROGRESS = 1
+    TRANSMITTED = 2
+    DEAD = 3
+
+
 @dataclass
 class SimplePort:
     dpid: int
@@ -96,6 +107,7 @@ class SimplePort:
     mac: str
     load: int = 0
     max_load: int = 0
+    state: PortStates = PortStates.NEW
 
 
 @dataclass
@@ -110,6 +122,12 @@ class Node:
     datapath: Optional[Datapath]
     neighbours: Dict[int, 'Node'] = field(default_factory=dict)  # port to node
     ports: Dict[int, SimplePort] = field(default_factory=dict)
+
+    def __getstate__(self):
+        return (self.neighbours, self.ports)
+
+    def __setstate__(self, state):
+        self.neighbours, self.ports = state
 
 
 class ArpDispatcher:
@@ -244,9 +262,12 @@ class NetGraph:
             node = Node(datapath=sw.dp,
                         neighbours={}, ports={port.port_no: SimplePort(port.dpid, port.port_no, port.hw_addr) for port in sw.ports})
 
+            # keep existing port informatin (load, state, etc)
             existing = self._node_graph.get(sw.dp.id)
             if existing is not None:
                 for port_no, port in existing.ports.items():
+                    if port.mac != node.ports[port_no].mac:
+                        raise Exception("port number change")
                     node.ports[port_no] = port
             self._node_graph[sw.dp.id] = node
 
@@ -312,6 +333,9 @@ class NetGraph:
                       key=distances.get)
             visited.add(cur)
             for port_no, node in self._node_graph[cur].neighbours.items():
+                if self._node_graph[cur].ports[port_no].state == PortStates.DEAD:
+                    continue
+
                 if distances[cur] + self._node_graph[cur].ports[port_no].load < distances[node.datapath.id]:
                     distances[node.datapath.id] = distances[cur] + \
                         self._node_graph[cur].ports[port_no].load
@@ -340,6 +364,32 @@ class NetGraph:
     def call_on_all_broadcast_targets(self, cb: Callable[[Datapath, int], None]) -> None:
         for datapath, port_no in self._broadcast_targets:
             cb(datapath, port_no)
+
+    def snapshot(self, path: str):
+        with open(path, 'wb') as f:
+            try:
+                self._mutex.r_lock()
+                dill.dump(self._node_graph, f)
+            finally:
+                self._mutex.r_unlock()
+
+    def on_probe_receive(self, dpid: int, in_port: int, src_port_mac):
+        node = self._node_graph[dpid]
+        if node is None:
+            self.logger.info(f"no node found for dpid {dpid}")
+            return
+
+        src_node = node.neighbours.get(in_port)
+        if src_node is None:
+            self.logger.info(f"no neighbour found for port {in_port}")
+            return
+
+        for p in src_node.ports.values():
+            if p.mac == src_port_mac:
+                p.state = PortStates.TRANSMITTED
+                return
+
+        self.logger.info(f"no src port found with mac {src_port_mac}")
 
 
 @dataclass(frozen=True)
@@ -378,25 +428,81 @@ def OFPMatch_from_SimpleMatch(match: SimpleMatch) -> OFPMatch:
 
 
 establish_route_func = Callable[[OFPMatch, List[SimplePort], int, int], None]
+send_query_func = Callable[[Datapath, SimplePort], None]
+
+
+class EstablishRouteResult(str, Enum):
+    OK = 0
+    NO_ROUTE = 1
+    DP_NOT_IN_ROUTE = 2
+
+
+on_port_death_func = Callable[[str], None]
+
+
+class HTTPEndpoint():
+    _siem_addr: str
+
+    def __init__(self, siem_addr: str, listen_port: str, on_port_death: on_port_death_func):
+        self._siem_addr = siem_addr
+
+        self._app = Flask(__name__)
+
+        @self._app.route('/port', methods=['POST'])
+        def handle_port_death():
+            content = request.get_json()
+            on_port_death(content['mac'])
+            return Response(status=200)
+
+        hub.spawn(self._listen, listen_port)
+
+    def _listen(self, port):
+        self._app.run(host="0.0.0.0", port=port)
+        #serve(self._app, host="0.0.0.0", port=port)
+
+    def port_state(self, mac: str, state: PortStates):
+        payload = {
+            'mac': mac,
+            'state': state
+        }
+        try:
+            r = requests.post(self._siem_addr+"/port", json=payload)
+            if r.status_code != 200:
+                print(r.json())
+        except Exception as e:
+            print(e)
 
 
 class RoutingManager:
     _routes: Dict[int, Tuple[SimpleMatch, List[SimplePort]]]
-    _matches: Set[SimpleMatch]
+    _matches: Dict[SimpleMatch, List[SimplePort]]
     _mu: hub.BoundedSemaphore
     _net_graph: NetGraph
+    _http_endpoint: HTTPEndpoint
+    # mac to port and list of cookies
+    _ports: Dict[str, Tuple[SimplePort, List[str]]]
 
     def __init__(self, net_graph):
         self._mu = hub.BoundedSemaphore()
         self._routes = {}
-        self._matches = set()
+        self._matches = {}
+        self._ports = {}
         self._net_graph = net_graph
+        self._http_endpoint = HTTPEndpoint(
+            "http://localhost:7050", "7051", self.on_port_death)
 
-    def _establish_route(self, match: SimpleMatch, establish_route: establish_route_func) -> Boolean:
+    def _establish_route(self, match: SimpleMatch, establish_route: establish_route_func, neccessary_dpid: int) -> EstablishRouteResult:
         if match not in self._matches:
             route = self._net_graph.get_route(match.eth_src, match.eth_dst)
             if route is None:
-                return False
+                return EstablishRouteResult.NO_ROUTE
+
+            if neccessary_dpid is not None:
+                for port in route:
+                    if port.dpid == neccessary_dpid:
+                        break
+                else:
+                    return EstablishRouteResult.DP_NOT_IN_ROUTE
 
             priority = 10 if match.kind == '' else 1
             cookie = randint(0, UINT64_MAX)
@@ -407,40 +513,98 @@ class RoutingManager:
             self._net_graph.adjust_cost(route, FLOW_COST)
 
             self._routes[cookie] = (match, route)
-            self._matches.add(match)
+            self._matches[match] = route
+            for port in route[1:]:
+                self._ports.setdefault(port.mac, (port, []))[1].append(cookie)
 
             t = time.localtime()
             t = time.strftime("%H:%M:%S", t)
             print(
                 f"{t}: established route from {match.eth_src} port {match.tcp_src} to {match.eth_dst} port {match.tcp_dst}")
+        elif neccessary_dpid is not None:
+            for port in self._matches[match]:
+                if port.dpid == neccessary_dpid:
+                    break
+            else:
+                return EstablishRouteResult.DP_NOT_IN_ROUTE
 
-        return True
+        return EstablishRouteResult.OK
 
-    def handle_route_request(self, forward_match: SimpleMatch, backward_match: SimpleMatch, establish_route: establish_route_func) -> Boolean:
+    def handle_route_request(self, forward_match: SimpleMatch, backward_match: SimpleMatch, establish_route: establish_route_func, neccessary_dpid: int) -> EstablishRouteResult:
         try:
             self._mu.acquire()
-            if not self._establish_route(forward_match, establish_route):
-                return False
-            if not self._establish_route(backward_match, establish_route):
-                return False
+            res = self._establish_route(
+                forward_match, establish_route, neccessary_dpid)
+            if res != EstablishRouteResult.OK:
+                return res
 
-            return True
+            return self._establish_route(backward_match, establish_route, None)
+        finally:
+            self._mu.release()
+
+    def _delete_route(self, cookie: int):
+        if cookie in self._routes.keys():
+            match, route = self._routes[cookie]
+            self._net_graph.adjust_cost(route, -FLOW_COST)
+            del self._routes[cookie]
+            del self._matches[match]
+            for port in route[1:]:
+                self._ports[port.mac][1].remove(cookie)
+                if len(self._ports[port.mac][1]) == 0:
+                    del self._ports[port.mac]
+
+            t = time.localtime()
+            t = time.strftime("%H:%M:%S", t)
+            print(
+                f"{t}: deleted route from {match.eth_src} port {match.tcp_src} to {match.eth_dst} port {match.tcp_dst}")
+
+    def on_port_death(self, mac: str):
+        try:
+            self._mu.acquire()
+            v = self._ports.get(mac)
+            if v is None:
+                return
+
+            port, cookies = v
+            port.state = PortStates.DEAD
+            for cookie in cookies:
+                self._delete_route(cookie)
+
+            print(f'set port {port} state to DEAD')
         finally:
             self._mu.release()
 
     def delete_route(self, cookie: int):
         try:
             self._mu.acquire()
-            if cookie in self._routes.keys():
-                match, route = self._routes[cookie]
-                self._net_graph.adjust_cost(route, -FLOW_COST)
-                del self._routes[cookie]
-                self._matches.remove(match)
+            self._delete_route(cookie)
+        finally:
+            self._mu.release()
 
-                t = time.localtime()
-                t = time.strftime("%H:%M:%S", t)
-                print(
-                    f"{t}: deleted route from {match.eth_src} port {match.tcp_src} to {match.eth_dst} port {match.tcp_dst}")
+    def _check_port_states(self):
+        for mac, v in self._ports.items():
+            print(f'sending port state: {mac} {v[0].state}')
+            self._http_endpoint.port_state(mac, v[0].state)
+
+    def _query_all_used_ports(self, send_query: send_query_func):
+        for v in self._ports.values():
+            port = v[0]
+            if port.state == PortStates.DEAD:
+                continue
+
+            node = self._net_graph.get_node(port.dpid)
+            if node is None:
+                print(f"no node found for dpid {port.dpid}")
+                continue
+
+            send_query(node.datapath, port)
+            port.state = PortStates.IN_PROGRESS
+
+    def probe_iteration(self, send_query: send_query_func):
+        try:
+            self._mu.acquire()
+            self._check_port_states()
+            self._query_all_used_ports(send_query)
         finally:
             self._mu.release()
 
@@ -452,7 +616,8 @@ class MULTIPATH_13(app_manager.RyuApp):
         super(MULTIPATH_13, self).__init__(*args, **kwargs)
         self._net_graph = NetGraph(self.logger)
         self._arp_dispatcher = ArpDispatcher(1)
-        self._monitor_thread = hub.spawn(self.query_switches)
+        hub.spawn(self.query_switches)
+        # hub.spawn(self._snapshot)
         self._routing_manager = RoutingManager(self._net_graph)
 
     @ set_ev_cls(
@@ -532,11 +697,24 @@ class MULTIPATH_13(app_manager.RyuApp):
             data=msg_data, in_port=src_port, actions=actions)
         return out
 
-    def send_packet_out(self, datapath, buffer_id, src_port, dst_port, data):
+    def _send_packet_out(self, datapath, buffer_id, src_port, dst_port, data):
         out = self._build_packet_out(datapath, buffer_id,
                                      src_port, dst_port, data)
         if out:
             datapath.send_msg(out)
+
+    def _drop_packet(self, datapath, buffer_id, src_port, dst_port, data):
+        msg_data = None
+        if buffer_id == datapath.ofproto.OFP_NO_BUFFER:
+            if data is None:
+                return None
+            msg_data = data
+
+        out = datapath.ofproto_parser.OFPPacketOut(
+            datapath=datapath, buffer_id=buffer_id,
+            data=msg_data, in_port=src_port)
+
+        datapath.send_msg(out)
 
     def _handle_arp_reply(self, arp_pkt: arp.arp):
         waiting_list = self._arp_dispatcher.handle_arp_reply(
@@ -577,8 +755,8 @@ class MULTIPATH_13(app_manager.RyuApp):
             ofproto = datapath.ofproto
             port_no = h.port.port_no
 
-            self.send_packet_out(datapath, datapath.ofproto.OFP_NO_BUFFER,
-                                 ofproto.OFPP_CONTROLLER, port_no, response.data)
+            self._send_packet_out(datapath, datapath.ofproto.OFP_NO_BUFFER,
+                                  ofproto.OFPP_CONTROLLER, port_no, response.data)
 
     def _request_arp(self, target_ip: str, src_ip: str, src_mac: str):
         request = packet.Packet()
@@ -596,8 +774,8 @@ class MULTIPATH_13(app_manager.RyuApp):
 
         def cb(datapath: Datapath, port_no: int) -> None:
             ofproto = datapath.ofproto
-            self.send_packet_out(datapath, datapath.ofproto.OFP_NO_BUFFER,
-                                 ofproto.OFPP_CONTROLLER, port_no, request.data)
+            self._send_packet_out(datapath, datapath.ofproto.OFP_NO_BUFFER,
+                                  ofproto.OFPP_CONTROLLER, port_no, request.data)
         self._net_graph.call_on_all_broadcast_targets(cb)
 
     def _handle_arp_req(self, arp_pkt: arp.arp):
@@ -671,6 +849,7 @@ class MULTIPATH_13(app_manager.RyuApp):
         datapath = msg.datapath
         parser = datapath.ofproto_parser
         pkt = packet.Packet(msg.data)
+        ofproto = datapath.ofproto
 
         matches = self._create_matches(pkt)
         if matches is None:
@@ -679,19 +858,35 @@ class MULTIPATH_13(app_manager.RyuApp):
         def er(match: OFPMatch, route: List[SimplePort], priority: int, cookie: int):
             self._establish_route(parser, match, route, priority, cookie)
 
-        if not self._routing_manager.handle_route_request(matches[0], matches[1], er):
+        res = self._routing_manager.handle_route_request(
+            matches[0], matches[1], er, datapath.id)
+        if res == EstablishRouteResult.NO_ROUTE:
             # try one more time because graph could have been not updated
             self.update_switches()
-            if not self._routing_manager.handle_route_request(matches[0], matches[1], er):
+            res = self._routing_manager.handle_route_request(
+                matches[0], matches[1], er, datapath.id)
+            if res == EstablishRouteResult.NO_ROUTE:
                 # we are done
                 self.logger.info(
                     "could not create route from %s to %s", matches[0].eth_src, matches[0].eth_dst)
                 return
+        elif res == EstablishRouteResult.DP_NOT_IN_ROUTE:
+            self.logger.info(
+                "dpid not in not route from %s to %s", matches[0].eth_src, matches[0].eth_dst)
+            self._drop_packet(datapath, msg.buffer_id,
+                              ofproto.OFPP_CONTROLLER, ofproto.OFPP_TABLE, msg.data)
+            return
 
         # send this packet back to switch and let it match newly added rules
-        ofproto = datapath.ofproto
-        self.send_packet_out(datapath, msg.buffer_id,
-                             ofproto.OFPP_CONTROLLER, ofproto.OFPP_TABLE, msg.data)
+        self._send_packet_out(datapath, msg.buffer_id,
+                              ofproto.OFPP_CONTROLLER, ofproto.OFPP_TABLE, msg.data)
+
+    def _handle_latency_probe(self, msg):
+        pkt = packet.Packet(msg.data)
+        eth: ethernet.ethernet = pkt.get_protocol(ethernet.ethernet)
+
+        self._net_graph.on_probe_receive(
+            msg.datapath.id, msg.match['in_port'], eth.src)
 
     @ set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -713,13 +908,9 @@ class MULTIPATH_13(app_manager.RyuApp):
         if isinstance(ip_pkt, ipv4.ipv4):
             self._handle_ip(msg)
 
-        eth = pkt.get_protocols(ethernet.ethernet)[0]
-        if eth.ethertype == LATENCY_PROBE:
-            packet.Packet(msg.data)
-            print(f'receiving {pkt.protocols}')
-            latency_probe_pkt = pkt.get_protocol(LatencyProbePacket)
-            if isinstance(latency_probe_pkt, LatencyProbePacket):
-                print(pkt)
+        latency_probe_pkt = pkt.get_protocol(LatencyProbePacket)
+        if isinstance(latency_probe_pkt, LatencyProbePacket):
+            self._handle_latency_probe(msg)
 
     @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
     def _flow_removed_handler(self, ev):
@@ -733,63 +924,24 @@ class MULTIPATH_13(app_manager.RyuApp):
             self.logger.info(f"unexpected route remove reason: {msg.reason}")
 
     def query_switches(self) -> None:
-        def request_stats(node: Node) -> None:
-            dp = node.datapath
-            ofp = dp.ofproto
-            ofp_parser = dp.ofproto_parser
-            req = ofp_parser.OFPPortStatsRequest(dp, 0, ofp.OFPP_ANY)
-            print('Sent ', req)
-            dp.send_msg(req)
-
-        def send_latency_probe(node: Node):
-            datapath = node.datapath
+        def send_latency_probe(datapath: Datapath, port: SimplePort):
             ofproto = datapath.ofproto
 
-            for port_no in node.neighbours:
-                probe = packet.Packet()
-                probe.add_protocol(ethernet.ethernet(
-                    ethertype=LATENCY_PROBE,
-                    dst="11:22:33:44:55:66",
-                    src="00:11:22:33:44:55"
-                    # dst=node.ports[port_no].mac, #TODO: add mac to SimplePort
-                ))
+            probe = packet.Packet()
+            probe.add_protocol(ethernet.ethernet(
+                ethertype=LATENCY_PROBE,
+                dst=port.mac,  # must not match any flow
+                src=port.mac
+            ))
 
-                probe.add_protocol(LatencyProbePacket(time.time_ns()))
-
-                probe.serialize()
-
-                print(f'writing {probe.protocols}')
-
-                self.send_packet_out(datapath, datapath.ofproto.OFP_NO_BUFFER,
-                                     ofproto.OFPP_CONTROLLER, port_no, probe.data)
+            probe.add_protocol(LatencyProbePacket(time.time_ns()))
+            probe.serialize()
+            self._send_packet_out(datapath, datapath.ofproto.OFP_NO_BUFFER,
+                                  ofproto.OFPP_CONTROLLER, port.port_no, probe.data)
 
         while True:
-            hub.sleep(5)
-            # self.net_graph.call_on_all_nodes(request_stats)
-            # self.net_graph.call_on_all_nodes(send_latency_probe)
-
-    @ set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
-    def port_stats_reply_handler(self, ev):
-        ports = []
-        for stat in ev.msg.body:
-            ports.append('port_no=%d '
-                         'rx_packets=%d tx_packets=%d '
-                         'rx_bytes=%d tx_bytes=%d '
-                         'rx_dropped=%d tx_dropped=%d '
-                         'rx_errors=%d tx_errors=%d '
-                         'rx_frame_err=%d rx_over_err=%d rx_crc_err=%d '
-                         'collisions=%d duration_sec=%d duration_nsec=%d' %
-                         (stat.port_no,
-                          stat.rx_packets, stat.tx_packets,
-                          stat.rx_bytes, stat.tx_bytes,
-                          stat.rx_dropped, stat.tx_dropped,
-                          stat.rx_errors, stat.tx_errors,
-                          stat.rx_frame_err, stat.rx_over_err,
-                          stat.rx_crc_err, stat.collisions,
-                          stat.duration_sec, stat.duration_nsec))
-            print(ports[-1])
-            print()
-        # print('PortStats: ', ports)
+            hub.sleep(1)
+            self._routing_manager.probe_iteration(send_latency_probe)
 
     @ set_ev_cls(event.EventSwitchEnter)
     def handler_switch_enter(self, ev):
@@ -802,4 +954,10 @@ class MULTIPATH_13(app_manager.RyuApp):
 
         self._net_graph.update_switches(switches, links)
 
-        # self.query_ports_description() #port description has false information
+    def _snapshot(self):
+        base_path = "/home/mininet/project/data/snaps/"
+        counter = 0
+        while True:
+            self._net_graph.snapshot(base_path+str(counter))
+            counter += 1
+            hub.sleep(1)

@@ -23,6 +23,9 @@ KIND_VIDEO = "video"
 
 
 def count_speed(row):
+    if row[FIELD_REQUEST_TIMESTAMP] == '' or row[FIELD_LAST_RESPONSE_TIME] == '':
+        return 0
+
     parsed_start = datetime.strptime(
         " ".join(row[FIELD_REQUEST_TIMESTAMP].split()), '%b %d %H:%M:%S.%f')
     parsed_end = datetime.strptime(
