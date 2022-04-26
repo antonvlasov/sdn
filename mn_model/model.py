@@ -35,7 +35,7 @@ class MyTopo(Topo):
 
         for edge in topo.endpoints:
             self.addLink(hosts[edge[0]], switches[edge[1]],
-                         cls=TCLink, bw=bw)
+                         cls=TCLink)
         for edge in topo.sw_conns:
             self.addLink(switches[edge[0]],
                          switches[edge[1]], cls=TCLink, bw=bw)

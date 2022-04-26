@@ -333,7 +333,11 @@ class NetGraph:
                       key=distances.get)
             visited.add(cur)
             for port_no, node in self._node_graph[cur].neighbours.items():
+                # don't use dead links
                 if self._node_graph[cur].ports[port_no].state == PortStates.DEAD:
+                    continue
+                # don't use already full routes
+                if distances[cur] + self._node_graph[cur].ports[port_no].load + FLOW_COST > self._node_graph[cur].ports[port_no].max_load:
                     continue
 
                 if distances[cur] + self._node_graph[cur].ports[port_no].load < distances[node.datapath.id]:

@@ -76,8 +76,8 @@ def distribute_by_load(groups_by_load: List[Tuple[Set[str], str]], port: PortLoa
     '''
     list tuple: set of ports; max_load
     '''
-    KOEF = 2
-    idx = int(port.load/(port.max_load/KOEF)*len(groups_by_load))
+    KOEF = 0.9
+    idx = int(port.load/(port.max_load*KOEF)*len(groups_by_load))
     if idx >= len(groups_by_load):
         idx = len(groups_by_load)-1
     groups_by_load[idx][0].add(port.name)
@@ -126,8 +126,11 @@ def update_graph(g: nx.Graph, node_graph: Dict[int, Node]) -> Boolean:
     g.add_edges_from(sw_port_links)
     g.add_edges_from(port_port_links)
 
-    # pos = nx.spring_layout(g, seed=1)
-    pos = crystal_pos
+    pos = None
+    if len(node_graph) == 6:
+        pos = crystal_pos
+    else:
+        pos = nx.spring_layout(g, seed=1)
 
     nx.draw_networkx_nodes(g, pos, nodelist=switches, node_size=500,
                            node_shape='s', node_color='#DCDCDC')
@@ -153,17 +156,77 @@ def fig2img(fig):
     return img
 
 
-def make_gif(snapshots_path: str, dst: str, randomize: bool):
+def get_stats(node_graph: Dict[int, Node]) -> Tuple[np.array, np.array]:
+    loads = []
+    free = []
+    for node in node_graph.values():
+        loads.extend([port.load for port in node.ports.values()])
+        free.extend([port.max_load-port.load for port in node.ports.values()])
+    loads = np.array(loads)
+    free = np.array(free)
+
+    return loads, free
+
+
+def draw_boxplot(stat_snapshots: Tuple[np.array, np.array], boxplot: str):
+    max1 = 0
+    max2 = 0
+    for s in stat_snapshots:
+        if len(s[0]) > 0:
+            max1 = max(max1, s[0].max())
+        if len(s[1]) > 0:
+            max2 = max(max2, s[1].max())
+
+    boxplot_imgs = []
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    ax.tick_params(axis='both', which='major', labelsize=14)
+
+    for i, s in enumerate(stat_snapshots):
+        ax.boxplot(s)
+        plt.title(str(float(i)/2.0) + 's')
+        fig.subplots_adjust(left=0.15)
+        ax.set_xticklabels(['load', 'free'])
+        ax.set_ylabel('MBit/s')
+
+        boxplot_imgs.append(fig2img(fig))
+        ax.cla()
+
+    boxplot_imgs[0].save(fp=boxplot, format='GIF',
+                         append_images=boxplot_imgs[1:], save_all=True, duration=300, loop=0)
+    plt.cla()
+
+
+def mean(stat_snapshots: Tuple[np.array, np.array], mean_path: str):
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    ax.set_ylabel('MBit/s')
+    ax.set_xlabel('time, s')
+    ax.set_title('Load')
+
+    ax.plot(np.linspace(0, float(len(stat_snapshots))/2.0,
+                        num=len(stat_snapshots)), [s[0].mean() for s in stat_snapshots], color='red', label='load')
+    plt.savefig(mean_path)
+    plt.cla()
+
+
+def create_analytics(snapshots_path: str, dst_folder: str):
     g = nx.Graph()
     count = len(os.listdir(snapshots_path))
     imgs: List[Image.Image] = []
+
+    stat_snapshots = []
+
     for i in range(count):
         node_graph = CustomUnpickler(
             open(os.path.join(snapshots_path, str(i)), 'rb')).load()
-        if randomize:
-            randomize_load(node_graph)
-        updated = update_graph(g, node_graph)
-        if not updated:
+
+        loads, free = get_stats(node_graph)
+        stat_snapshots.append((loads, free))
+
+        not_empty = update_graph(g, node_graph)
+        if not not_empty:
             continue
 
         fig = plt.gcf()
@@ -173,17 +236,13 @@ def make_gif(snapshots_path: str, dst: str, randomize: bool):
     if len(imgs) == 0:
         print("no images")
         return
-    imgs[0].save(fp=dst, format='GIF', append_images=imgs[1:],
+
+    draw_boxplot(stat_snapshots, os.path.join(dst_folder, 'boxplot.gif'))
+    mean(stat_snapshots, os.path.join(dst_folder, 'mean.png'))
+
+    imgs[0].save(fp=os.path.join(dst_folder, 'load.gif'), format='GIF', append_images=imgs[1:],
                  save_all=True, duration=300, loop=0)
 
 
-def randomize_load(node_graph: Dict[int, Node]):
-    for node in node_graph.values():
-        for port in node.ports.values():
-            port.max_load = 10
-            port.load = randint(0, 10)
-
-
 if __name__ == "__main__":
-    make_gif(SNAPSHOT_DIR,
-             os.path.join(ANIMATION_DIR, 'load_new.gif'), False)
+    create_analytics(SNAPSHOT_DIR, os.path.join(ANIMATION_DIR, 'exp1'))
