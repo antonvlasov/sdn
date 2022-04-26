@@ -12,10 +12,10 @@ import (
 )
 
 func generageScenario() {
-	path := "/home/mininet/project/data/scenario/crystal/"
+	path := "/home/mininet/project/data/scenario/simplest/"
 	name := "h1"
 	kinds := []string{service.KindFile, service.KindVideo, service.KindWeb}
-	pack := 15
+	pack := 17
 	n := 2
 	start := 1.5
 	offset := 25.0
@@ -27,7 +27,7 @@ func generageScenario() {
 		tasks[i] = service.Task{
 			TimeOffsetSeconds: start + offset*float64(i/pack),
 			Kind:              kinds[rand.Intn(len(kinds))],
-			Server:            "10.0.0.6",
+			Server:            "10.0.0.2",
 			Path:              "100mBit",
 		}
 	}

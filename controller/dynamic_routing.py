@@ -310,7 +310,7 @@ class NetGraph:
             dst_dpid = dst_host.port.dpid
 
             route: List[SimplePort] = self.deikstra(src_dpid, dst_dpid)
-            if route is None:
+            if len(route) == 0:
                 # TODO : what if hosts are on same switch?
                 return None
             # add path from last switch to dst host
@@ -461,8 +461,8 @@ class HTTPEndpoint():
         hub.spawn(self._listen, listen_port)
 
     def _listen(self, port):
-        self._app.run(host="0.0.0.0", port=port)
-        #serve(self._app, host="0.0.0.0", port=port)
+        #self._app.run(host="0.0.0.0", port=port)
+        serve(self._app, host="0.0.0.0", port=port)
 
     def port_state(self, mac: str, state: PortStates):
         payload = {
@@ -478,7 +478,7 @@ class HTTPEndpoint():
 
 
 class RoutingManager:
-    _routes: Dict[int, Tuple[SimpleMatch, List[SimplePort]]]
+    _routes: Dict[int, Tuple[SimpleMatch, List[SimplePort], Boolean]]
     _matches: Dict[SimpleMatch, List[SimplePort]]
     _mu: hub.BoundedSemaphore
     _net_graph: NetGraph
@@ -514,9 +514,9 @@ class RoutingManager:
             establish_route(OFPMatch_from_SimpleMatch(
                 match), route, priority, cookie)
 
-            self._net_graph.adjust_cost(route, FLOW_COST)
+            self._adjust_cost(cookie, FLOW_COST)
 
-            self._routes[cookie] = (match, route)
+            self._routes[cookie] = (match, route, False)
             self._matches[match] = route
             for port in route[1:]:
                 self._ports.setdefault(port.mac, (port, []))[1].append(cookie)
@@ -546,10 +546,19 @@ class RoutingManager:
         finally:
             self._mu.release()
 
+    def _adjust_cost(self, cookie, value):
+        if cookie not in self._routes.keys():
+            return
+
+        match, route, added = self._routes[cookie]
+        if (not added and value > 0) or (added and value < 0):
+            self._net_graph.adjust_cost(route, value)
+            self._routes = (match, route, True)
+
     def _delete_route(self, cookie: int):
         if cookie in self._routes.keys():
-            match, route = self._routes[cookie]
-            self._net_graph.adjust_cost(route, -FLOW_COST)
+            match, route, _ = self._routes[cookie]
+            self._adjust_cost(cookie, -FLOW_COST)
             del self._routes[cookie]
             del self._matches[match]
             for port in route[1:]:
@@ -587,7 +596,7 @@ class RoutingManager:
 
     def _check_port_states(self):
         for mac, v in self._ports.items():
-            print(f'sending port state: {mac} {v[0].state}')
+            #print(f'sending port state: {mac} {v[0].state}')
             self._http_endpoint.port_state(mac, v[0].state)
 
     def _query_all_used_ports(self, send_query: send_query_func):
@@ -716,7 +725,7 @@ class MULTIPATH_13(app_manager.RyuApp):
 
         out = datapath.ofproto_parser.OFPPacketOut(
             datapath=datapath, buffer_id=buffer_id,
-            data=msg_data, in_port=src_port)
+            data=msg_data, in_port=src_port, actions=[])
 
         datapath.send_msg(out)
 
@@ -876,7 +885,7 @@ class MULTIPATH_13(app_manager.RyuApp):
                 return
         elif res == EstablishRouteResult.DP_NOT_IN_ROUTE:
             self.logger.info(
-                "dpid not in not route from %s to %s", matches[0].eth_src, matches[0].eth_dst)
+                "dpid %s not in not route from %s to %s", datapath.id, matches[0].eth_src, matches[0].eth_dst)
             self._drop_packet(datapath, msg.buffer_id,
                               ofproto.OFPP_CONTROLLER, ofproto.OFPP_TABLE, msg.data)
             return
